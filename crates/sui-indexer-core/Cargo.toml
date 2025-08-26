@@ -18,6 +18,7 @@ sui-indexer-storage = { path = "../sui-indexer-storage" }
 
 # Sui dependencies (moved from sui-indexer-sui)
 sui-rpc-api = { git = "https://github.com/MystenLabs/sui.git" }
+sui-json-rpc-types.workspace = true
 sui-types.workspace = true
 
 # Async runtime
@@ -33,5 +34,20 @@ eyre.workspace = true
 # Tracing
 tracing.workspace = true
 
+# Additional dependencies for examples
+async-trait.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+tracing-subscriber.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true
+
+# Examples
+[[example]]
+name = "simple_indexer"
+path = "../../examples/simple_indexer.rs"
+
+[[example]]
+name = "custom_defi_indexer"
+path = "../../examples/custom_defi_indexer.rs"

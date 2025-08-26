@@ -7082,17 +7082,22 @@ dependencies = [
 name = "sui-indexer-core"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "chrono",
  "eyre",
  "serde",
  "serde_json",
  "sui-indexer-config",
  "sui-indexer-events",
  "sui-indexer-storage",
+ "sui-json-rpc-types",
  "sui-rpc-api",
  "sui-types",
  "tempfile",
  "tokio",
  "tracing",
+ "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
