@@ -1,0 +1,42 @@
+# Sui Indexer Configuration
+# Complete example configuration file
+
+[network]
+grpc_url = "https://fullnode.testnet.sui.io:443"
+network = "testnet"
+
+[network.pool]
+max_connections = 10
+timeout = 30
+keep_alive = 60
+
+[network.retry]
+max_attempts = 3
+initial_delay = 1000
+max_delay = 10000
+backoff_multiplier = 2.0
+
+[database]
+url = "postgresql://localhost/sui_indexer"
+max_connections = 20
+min_connections = 5
+connect_timeout = 30
+idle_timeout = 600
+auto_migrate = true
+
+[events]
+start_checkpoint = 0
+batch_size = 100
+max_concurrent_batches = 10
+index_transactions = true
+index_objects = true
+
+# Example event filters
+[[events.filters]]
+package = "0x2"
+module = "sui"
+event_type = "Transfer"
+
+[[events.filters]]
+package = "0x2"
+module = "coin"

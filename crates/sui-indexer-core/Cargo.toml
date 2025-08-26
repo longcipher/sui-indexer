@@ -1,0 +1,37 @@
+[package]
+name = "sui-indexer-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Core indexer library for Sui Indexer"
+
+[dependencies]
+# Workspace dependencies
+sui-indexer-config = { path = "../sui-indexer-config" }
+sui-indexer-events = { path = "../sui-indexer-events" }
+sui-indexer-storage = { path = "../sui-indexer-storage" }
+
+# Sui dependencies (moved from sui-indexer-sui)
+sui-rpc-api = { git = "https://github.com/MystenLabs/sui.git" }
+sui-types.workspace = true
+
+# Async runtime
+tokio.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Error handling
+eyre.workspace = true
+
+# Tracing
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -1,0 +1,104 @@
+[workspace]
+resolver = "2"
+members = [
+    "bin/sui-indexer-cli",
+    "crates/sui-indexer-core",
+    "crates/sui-indexer-config",
+    "crates/sui-indexer-events",
+    "crates/sui-indexer-storage",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/longcipher/sui-indexer"
+homepage = "https://github.com/longcipher/sui-indexer"
+documentation = "https://docs.rs/sui-indexer"
+authors = ["longcipher <longcipher@gmail.com>"]
+rust-version = "1.89.0"
+
+[workspace.dependencies]
+# Sui dependencies
+sui-config = { git = "https://github.com/MystenLabs/sui.git" }
+sui-json-rpc-api = { git = "https://github.com/MystenLabs/sui.git" }
+sui-json-rpc-types = { git = "https://github.com/MystenLabs/sui.git" }
+sui-rpc-api = { git = "https://github.com/MystenLabs/sui.git" }
+sui-sdk = { git = "https://github.com/MystenLabs/sui.git" }
+sui-sdk-types = { git = "https://github.com/MystenLabs/sui.git" }
+sui-types = { git = "https://github.com/MystenLabs/sui.git" }
+
+# Async runtime
+tokio = { version = "1.0", features = ["full"] }
+tokio-stream = "0.1"
+tokio-util = "0.7"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.9.5"
+
+# Database
+sqlx = { version = "0.8.6", features = [
+    "runtime-tokio-rustls",
+    "postgres",
+    "chrono",
+    "uuid",
+    "json",
+    "migrate",
+] }
+
+# Error handling
+anyhow = "1.0"
+eyre = "0.6"
+thiserror = "2.0"
+
+# CLI
+clap = { version = "4.0", features = ["derive", "env", "color"] }
+
+# Configuration
+config = "0.15.14"
+
+# Logging and tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# HTTP and networking
+hyper = "0.17"
+reqwest = { version = "0.12.23", features = ["json", "stream"] }
+tower = "0.5.2"
+tower-http = "0.6.6"
+
+# gRPC
+prost = "0.14.1"
+tonic = "0.14.1"
+
+# GraphQL
+async-graphql = { version = "7.0", features = ["chrono", "uuid", "dataloader"] }
+async-graphql-axum = "7.0"
+
+# Web framework
+axum = { version = "0.7", features = ["ws", "macros"] }
+
+# Data structures
+chrono = { version = "0.4", features = ["serde"] }
+url = "2.0"
+uuid = { version = "1.0", features = ["v4", "serde"] }
+
+# Streaming and messaging
+rdkafka = { version = "0.38", features = ["cmake-build"] }
+redis = { version = "0.32", features = ["tokio-comp", "connection-manager"] }
+
+# Utilities
+async-trait = "0.1"
+futures = "0.3"
+hex = "0.4"
+parking_lot = "0.12"
+pin-project = "1.0"
+scc = "2.2"
+
+# WebSocket
+tokio-tungstenite = "0.27"
+
+# Development dependencies
+tempfile = "3.0"

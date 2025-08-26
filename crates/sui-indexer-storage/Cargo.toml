@@ -1,0 +1,39 @@
+[package]
+name = "sui-indexer-storage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Storage layer for Sui Indexer"
+
+[dependencies]
+# Workspace dependencies
+sui-indexer-config = { path = "../sui-indexer-config" }
+sui-indexer-events = { path = "../sui-indexer-events" }
+
+# Database
+sqlx.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Error handling
+eyre.workspace = true
+
+# Traits
+async-trait.workspace = true
+
+# Data structures
+chrono.workspace = true
+uuid.workspace = true
+
+# Tracing
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

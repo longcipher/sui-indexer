@@ -1,0 +1,42 @@
+# Navi Protocol Mainnet Configuration with gRPC
+[network]
+# Using Sui mainnet gRPC endpoint (required for this test)
+grpc_url = "https://fullnode.mainnet.sui.io:443"
+network = "mainnet"
+
+[network.pool]
+max_connections = 20
+timeout = 30
+keep_alive = 60
+
+[network.retry]
+max_attempts = 5
+initial_delay = 2000
+max_delay = 30000
+backoff_multiplier = 2.0
+
+[database]
+url = "postgres://postgres:xxxx@localhost:5433/sui_indexer"
+max_connections = 20
+min_connections = 5
+connect_timeout = 30
+idle_timeout = 300
+auto_migrate = true
+
+[events]
+# Navi Protocol event indexing configuration
+batch_size = 50
+max_concurrent_batches = 4
+index_transactions = true
+index_objects = false
+
+# Monitor only DepositEvent and BorrowEvent from Navi lending module
+[[events.filters]]
+package = "0x81c408448d0d57b3e371ea94de1d40bf852784d3e225de1e74acab3e8395c18f"
+module = "lending"
+event_type = "0xd899cf7d2b5db716bd2cf55599fb0d5ee38a3061e7b6bb6eebf73fa5bc4c81ca::lending::DepositEvent"
+
+[[events.filters]]
+package = "0x81c408448d0d57b3e371ea94de1d40bf852784d3e225de1e74acab3e8395c18f"
+module = "lending"
+event_type = "0xd899cf7d2b5db716bd2cf55599fb0d5ee38a3061e7b6bb6eebf73fa5bc4c81ca::lending::BorrowEvent"
