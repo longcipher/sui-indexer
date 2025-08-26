@@ -1,4 +1,4 @@
-# Sui Indexer Fra## 🏗️ Architecture Overviewework
+# Sui Indexer
 
 **A high-performance, modular blockchain indexer for the Sui network with real-time event monitoring and customizable data processing**
 
