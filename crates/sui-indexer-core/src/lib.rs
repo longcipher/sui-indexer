@@ -82,7 +82,7 @@ impl IndexerCore {
     }
 
     /// Start the indexer service
-    pub async fn start(&self) -> Result<()> {
+    pub async fn start(&mut self) -> Result<()> {
         info!("✅ Sui Indexer started successfully!");
         info!("🌐 Network: {} (using gRPC)", self.config.network.network);
         info!("🔗 gRPC URL: {}", self.config.network.grpc_url);
@@ -141,7 +141,7 @@ impl IndexerCore {
     }
 
     /// Poll for new events and process them
-    async fn poll_and_process_events(&self) -> Result<()> {
+    async fn poll_and_process_events(&mut self) -> Result<()> {
         info!("🔍 Polling for new events...");
 
         // Get latest checkpoint
@@ -209,7 +209,7 @@ impl IndexerCore {
     }
 
     /// Health check
-    pub async fn health_check(&self) -> Result<bool> {
+    pub async fn health_check(&mut self) -> Result<bool> {
         let sui_healthy = self.sui_client.health_check().await?.healthy;
         let storage_healthy = self.storage.health_check().await?;
 

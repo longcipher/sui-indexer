@@ -23,7 +23,7 @@ impl SuiGrpcClient {
     pub async fn new(endpoint: &str) -> Result<Self> {
         info!("Connecting to Sui gRPC endpoint: {}", endpoint);
 
-        let client = SuiRpcApiClient::new(endpoint)
+        let mut client = SuiRpcApiClient::new(endpoint)
             .map_err(|e| eyre::eyre!("Failed to create gRPC client: {}", e))?;
 
         // Test the connection
@@ -41,7 +41,7 @@ impl SuiGrpcClient {
     }
 
     /// Get the latest checkpoint number
-    pub async fn get_latest_checkpoint(&self) -> Result<CheckpointSequenceNumber> {
+    pub async fn get_latest_checkpoint(&mut self) -> Result<CheckpointSequenceNumber> {
         debug!("Fetching latest checkpoint from gRPC");
 
         let checkpoint_summary = self
@@ -97,7 +97,7 @@ impl SuiGrpcClient {
 
     /// Query events by filter (using gRPC native types)
     pub async fn query_events(
-        &self,
+        &mut self,
         _transaction_digest: Option<String>,
         _sender: Option<String>,
         package_id: Option<String>,
@@ -164,7 +164,7 @@ impl SuiGrpcClient {
     }
 
     /// Health check for the gRPC connection
-    pub async fn health_check(&self) -> Result<()> {
+    pub async fn health_check(&mut self) -> Result<()> {
         debug!("Performing gRPC health check");
 
         match self.client.get_latest_checkpoint().await {

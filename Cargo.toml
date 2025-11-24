@@ -10,13 +10,12 @@ members = [
 
 [workspace.package]
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/longcipher/sui-indexer"
 homepage = "https://github.com/longcipher/sui-indexer"
 documentation = "https://docs.rs/sui-indexer"
 authors = ["longcipher <longcipher@gmail.com>"]
-rust-version = "1.89.0"
 
 [workspace.dependencies]
 # Sui dependencies
@@ -29,14 +28,14 @@ sui-sdk-types = { git = "https://github.com/MystenLabs/sui.git" }
 sui-types = { git = "https://github.com/MystenLabs/sui.git" }
 
 # Async runtime
-tokio = { version = "1.0", features = ["full"] }
-tokio-stream = "0.1"
-tokio-util = "0.7"
+tokio = { version = "1.48.0", features = ["full"] }
+tokio-stream = "0.1.17"
+tokio-util = "0.7.17"
 
 # Serialization
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-toml = "0.9.5"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+toml = "0.9.8"
 
 # Database
 sqlx = { version = "0.8.6", features = [
@@ -49,23 +48,23 @@ sqlx = { version = "0.8.6", features = [
 ] }
 
 # Error handling
-anyhow = "1.0"
-eyre = "0.6"
-thiserror = "2.0"
+anyhow = "1.0.100"
+eyre = "0.6.12"
+thiserror = "2.0.17"
 
 # CLI
-clap = { version = "4.0", features = ["derive", "env", "color"] }
+clap = { version = "4.5.53", features = ["derive", "env", "color"] }
 
 # Configuration
-config = "0.15.14"
+config = "0.15.19"
 
 # Logging and tracing
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.20", features = ["env-filter", "json"] }
 
 # HTTP and networking
-hyper = "0.17"
-reqwest = { version = "0.12.23", features = ["json", "stream"] }
+hyper = "1.8.1"
+reqwest = { version = "0.12.24", features = ["json", "stream"] }
 tower = "0.5.2"
 tower-http = "0.6.6"
 
@@ -74,31 +73,31 @@ prost = "0.14.1"
 tonic = "0.14.1"
 
 # GraphQL
-async-graphql = { version = "7.0", features = ["chrono", "uuid", "dataloader"] }
-async-graphql-axum = "7.0"
+async-graphql = { version = "7.0.17", features = ["chrono", "uuid", "dataloader"] }
+async-graphql-axum = "7.0.17"
 
 # Web framework
-axum = { version = "0.7", features = ["ws", "macros"] }
+axum = { version = "0.8.7", features = ["ws", "macros"] }
 
 # Data structures
-chrono = { version = "0.4", features = ["serde"] }
-url = "2.0"
-uuid = { version = "1.0", features = ["v4", "serde"] }
+chrono = { version = "0.4.42", features = ["serde"] }
+url = "2.5.7"
+uuid = { version = "1.18.1", features = ["v4", "serde"] }
 
 # Streaming and messaging
-rdkafka = { version = "0.38", features = ["cmake-build"] }
-redis = { version = "0.32", features = ["tokio-comp", "connection-manager"] }
+rdkafka = { version = "0.38.0", features = ["cmake-build"] }
+redis = { version = "0.32.7", features = ["tokio-comp", "connection-manager"] }
 
 # Utilities
-async-trait = "0.1"
-futures = "0.3"
-hex = "0.4"
-parking_lot = "0.12"
-pin-project = "1.0"
-scc = "2.2"
+async-trait = "0.1.89"
+futures = "0.3.31"
+hex = "0.4.3"
+parking_lot = "0.12.5"
+pin-project = "1.1.10"
+scc = "3.4.2"
 
 # WebSocket
-tokio-tungstenite = "0.27"
+tokio-tungstenite = "0.28.0"
 
 # Development dependencies
-tempfile = "3.0"
+tempfile = "3.23.0"

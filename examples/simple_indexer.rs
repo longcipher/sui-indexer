@@ -77,7 +77,7 @@ async fn main() -> Result<()> {
     let processor = Arc::new(SimpleEventProcessor::new());
 
     // Create and start indexer
-    let indexer = IndexerCore::with_event_processor(config, processor).await?;
+    let mut indexer = IndexerCore::with_event_processor(config, processor).await?;
     indexer.initialize().await?;
     indexer.start().await?;
 

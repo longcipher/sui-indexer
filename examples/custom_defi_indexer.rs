@@ -366,7 +366,7 @@ async fn main() -> Result<()> {
     let processor = Arc::new(DeFiEventProcessor::new());
 
     // Create indexer with custom processor
-    let indexer = IndexerCore::with_event_processor(config, processor).await?;
+    let mut indexer = IndexerCore::with_event_processor(config, processor).await?;
 
     // Initialize database and run migrations
     info!("🔧 Initializing indexer...");

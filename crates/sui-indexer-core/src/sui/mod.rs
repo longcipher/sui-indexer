@@ -62,7 +62,7 @@ impl SuiClient {
     }
 
     /// Get the latest checkpoint sequence number
-    pub async fn get_latest_checkpoint(&self) -> Result<u64> {
+    pub async fn get_latest_checkpoint(&mut self) -> Result<u64> {
         self.grpc_client.get_latest_checkpoint().await
     }
 
@@ -81,7 +81,7 @@ impl SuiClient {
 
     /// Query events with filter using pure gRPC
     pub async fn query_events(
-        &self,
+        &mut self,
         transaction_digest: Option<String>,
         sender: Option<String>,
         package_id: Option<String>,
@@ -107,7 +107,7 @@ impl SuiClient {
     }
 
     /// Get health status
-    pub async fn health_check(&self) -> Result<HealthStatus> {
+    pub async fn health_check(&mut self) -> Result<HealthStatus> {
         let start = std::time::Instant::now();
 
         match self.grpc_client.health_check().await {

@@ -46,7 +46,7 @@ async fn main() -> Result<()> {
             info!("Starting Sui Indexer");
 
             let config = ConfigLoader::from_file(&cli.config)?;
-            let indexer = IndexerCore::new(config).await?;
+            let mut indexer = IndexerCore::new(config).await?;
 
             // Initialize the indexer (run migrations, etc.)
             indexer.initialize().await?;
@@ -63,7 +63,7 @@ async fn main() -> Result<()> {
         }
         Commands::Health => {
             let config = ConfigLoader::from_file(&cli.config)?;
-            let indexer = IndexerCore::new(config).await?;
+            let mut indexer = IndexerCore::new(config).await?;
 
             let healthy = indexer.health_check().await?;
 
@@ -77,7 +77,7 @@ async fn main() -> Result<()> {
         }
         Commands::Status => {
             let config = ConfigLoader::from_file(&cli.config)?;
-            let indexer = IndexerCore::new(config).await?;
+            let mut indexer = IndexerCore::new(config).await?;
 
             info!("Checking indexer status");
 
