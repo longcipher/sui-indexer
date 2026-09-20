@@ -6,8 +6,8 @@ use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
 use crate::{
-    filter::EventFilterProcessor, EventTransformer, ProcessedEvent, ProcessedTransaction,
-    TransactionMetadata,
+    EventTransformer, ProcessedEvent, ProcessedTransaction, TransactionMetadata,
+    filter::EventFilterProcessor,
 };
 
 /// Batch processor for handling multiple events efficiently

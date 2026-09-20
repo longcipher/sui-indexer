@@ -4,10 +4,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-homepage.workspace = true
 documentation.workspace = true
 authors.workspace = true
 description = "Event processing pipeline for Sui Indexer"
+rust-version.workspace = true
+keywords = ["sui", "events", "indexer", "blockchain"]
+categories = ["cryptography::blockchain", "network-programming"]
+readme = "../../README.md"
 
 [dependencies]
 # Workspace dependencies
@@ -38,5 +41,5 @@ uuid.workspace = true
 # Tracing
 tracing.workspace = true
 
-[dev-dependencies]
-tempfile.workspace = true
+[lints]
+workspace = true

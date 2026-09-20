@@ -4,10 +4,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-homepage.workspace = true
 documentation.workspace = true
 authors.workspace = true
 description = "Storage layer for Sui Indexer"
+rust-version.workspace = true
+keywords = ["sui", "postgres", "indexer", "sqlx"]
+categories = ["database", "cryptography::blockchain"]
+readme = "../../README.md"
 
 [dependencies]
 # Workspace dependencies
@@ -34,5 +37,5 @@ uuid.workspace = true
 # Tracing
 tracing.workspace = true
 
-[dev-dependencies]
-tempfile.workspace = true
+[lints]
+workspace = true

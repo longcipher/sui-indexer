@@ -667,7 +667,7 @@ For detailed documentation on these examples, see [examples/README.md](examples/
 
 ## 📝 License
 
-This project is dual-licensed under MIT and Apache 2.0. See [LICENSE-MIT](LICENSE-MIT) and [LICENSE-APACHE](LICENSE-APACHE) for details.
+This project is dual-licensed under MIT and Apache 2.0. See the [LICENSE](LICENSE) file for details.
 
 ## 🙏 Acknowledgments
 

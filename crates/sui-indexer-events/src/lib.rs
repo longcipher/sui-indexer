@@ -308,33 +308,31 @@ mod tests {
         assert!(config.add_metadata);
     }
 
-    /*
-    #[test]
-    fn test_processed_event_uuid() {
-        use sui_types::base_types::ObjectID;
-
-        let event = ProcessedEvent {
-            id: Uuid::new_v4(),
-            event: serde_json::from_str(r#"{"id":{"eventSeq":"1","txDigest":"11111111111111111111111111111111"},"packageId":"0x0000000000000000000000000000000000000000000000000000000000000002","transactionModule":"test","sender":"0x0000000000000000000000000000000000000000000000000000000000000123","type":"0x2::test::Event","parsedJson":{},"bcs":"AQID","timestampMs":"1000"}"#).unwrap(),
-            transaction_digest: TransactionDigest::default(),
-            checkpoint_sequence: 123,
-            timestamp: Utc::now(),
-            package_id: ObjectID::ZERO,
-            module_name: "test".to_string(),
-            event_type: "test::Event".to_string(),
-            sender: "0x123".to_string(),
-            fields: serde_json::json!({}),
-            metadata: EventMetadata {
-                processed_at: Utc::now(),
-                processing_duration_ms: 100,
-                event_index: 0,
-                matched_filters: vec![],
-                tags: vec![],
-            },
-        };
-
-        // UUID should be valid
-        assert_ne!(event.id, Uuid::nil());
-    }
-    */
+    // #[test]
+    // fn test_processed_event_uuid() {
+    // use sui_types::base_types::ObjectID;
+    //
+    // let event = ProcessedEvent {
+    // id: Uuid::new_v4(),
+    // event: serde_json::from_str(r#"{"id":{"eventSeq":"1","txDigest":"11111111111111111111111111111111"},"packageId":"0x0000000000000000000000000000000000000000000000000000000000000002","transactionModule":"test","sender":"0x0000000000000000000000000000000000000000000000000000000000000123","type":"0x2::test::Event","parsedJson":{},"bcs":"AQID","timestampMs":"1000"}"#).unwrap(),
+    // transaction_digest: TransactionDigest::default(),
+    // checkpoint_sequence: 123,
+    // timestamp: Utc::now(),
+    // package_id: ObjectID::ZERO,
+    // module_name: "test".to_string(),
+    // event_type: "test::Event".to_string(),
+    // sender: "0x123".to_string(),
+    // fields: serde_json::json!({}),
+    // metadata: EventMetadata {
+    // processed_at: Utc::now(),
+    // processing_duration_ms: 100,
+    // event_index: 0,
+    // matched_filters: vec![],
+    // tags: vec![],
+    // },
+    // };
+    //
+    // UUID should be valid
+    // assert_ne!(event.id, Uuid::nil());
+    // }
 }

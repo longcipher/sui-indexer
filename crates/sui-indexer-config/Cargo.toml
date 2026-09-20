@@ -4,10 +4,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-homepage.workspace = true
 documentation.workspace = true
 authors.workspace = true
 description = "Configuration management for Sui Indexer"
+rust-version.workspace = true
+keywords = ["sui", "indexer", "config", "toml"]
+categories = ["config", "cryptography::blockchain"]
+readme = "../../README.md"
 
 [dependencies]
 config.workspace = true
@@ -18,3 +21,6 @@ url.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+
+[lints]
+workspace = true

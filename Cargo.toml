@@ -1,9 +1,9 @@
 [workspace]
-resolver = "2"
+resolver = "3"
 members = [
     "bin/sui-indexer-cli",
-    "crates/sui-indexer-core",
     "crates/sui-indexer-config",
+    "crates/sui-indexer-core",
     "crates/sui-indexer-events",
     "crates/sui-indexer-storage",
 ]
@@ -11,93 +11,121 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 license = "MIT OR Apache-2.0"
+description = "A high-performance, modular blockchain indexer for the Sui network"
 repository = "https://github.com/longcipher/sui-indexer"
-homepage = "https://github.com/longcipher/sui-indexer"
 documentation = "https://docs.rs/sui-indexer"
+readme = "README.md"
 authors = ["longcipher <longcipher@gmail.com>"]
+keywords = ["sui", "blockchain", "indexer", "web3", "postgres"]
+categories = ["cryptography::blockchain", "database", "network-programming"]
 
 [workspace.dependencies]
-# Sui dependencies
-sui-config = { git = "https://github.com/MystenLabs/sui.git" }
-sui-json-rpc-api = { git = "https://github.com/MystenLabs/sui.git" }
-sui-json-rpc-types = { git = "https://github.com/MystenLabs/sui.git" }
-sui-rpc-api = { git = "https://github.com/MystenLabs/sui.git" }
-sui-sdk = { git = "https://github.com/MystenLabs/sui.git" }
-sui-sdk-types = { git = "https://github.com/MystenLabs/sui.git" }
-sui-types = { git = "https://github.com/MystenLabs/sui.git" }
+# Sui dependencies — pinned to the latest `main` rev for reproducible builds.
+# When bumping the Sui SDK, update `rev` on ALL entries below to the same commit.
+# Current rev: be15a10386e78f5fa8d6be365a0fd228b22fa0c5
+sui-config = { git = "https://github.com/MystenLabs/sui.git", rev = "be15a10386e78f5fa8d6be365a0fd228b22fa0c5" }
+sui-json-rpc-api = { git = "https://github.com/MystenLabs/sui.git", rev = "be15a10386e78f5fa8d6be365a0fd228b22fa0c5" }
+sui-json-rpc-types = { git = "https://github.com/MystenLabs/sui.git", rev = "be15a10386e78f5fa8d6be365a0fd228b22fa0c5" }
+sui-rpc-api = { git = "https://github.com/MystenLabs/sui.git", rev = "be15a10386e78f5fa8d6be365a0fd228b22fa0c5" }
+sui-sdk = { git = "https://github.com/MystenLabs/sui.git", rev = "be15a10386e78f5fa8d6be365a0fd228b22fa0c5" }
+sui-sdk-types = { git = "https://github.com/MystenLabs/sui.git", rev = "be15a10386e78f5fa8d6be365a0fd228b22fa0c5" }
+sui-types = { git = "https://github.com/MystenLabs/sui.git", rev = "be15a10386e78f5fa8d6be365a0fd228b22fa0c5" }
 
 # Async runtime
-tokio = { version = "1.48.0", features = ["full"] }
-tokio-stream = "0.1.17"
-tokio-util = "0.7.17"
+tokio = { version = "=1.52.1", features = ["full"] }
 
 # Serialization
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
-toml = "0.9.8"
+toml = "1.1.6"
 
 # Database
-sqlx = { version = "0.8.6", features = [
-    "runtime-tokio-rustls",
+eyre = "0.6.14"
+sqlx = { version = "0.9.0", features = [
+    "runtime-tokio",
+    "tls-rustls",
     "postgres",
     "chrono",
     "uuid",
     "json",
     "migrate",
 ] }
-
-# Error handling
-anyhow = "1.0.100"
-eyre = "0.6.12"
-thiserror = "2.0.17"
+thiserror = "2.0.20"
 
 # CLI
-clap = { version = "4.5.53", features = ["derive", "env", "color"] }
+clap = { version = "4.6.7", features = ["derive", "env", "color"] }
 
 # Configuration
-config = "0.15.19"
+config = "0.15.25"
 
 # Logging and tracing
-tracing = "0.1.41"
-tracing-subscriber = { version = "0.3.20", features = ["env-filter", "json"] }
-
-# HTTP and networking
-hyper = "1.8.1"
-reqwest = { version = "0.12.24", features = ["json", "stream"] }
-tower = "0.5.2"
-tower-http = "0.6.6"
-
-# gRPC
-prost = "0.14.1"
-tonic = "0.14.1"
-
-# GraphQL
-async-graphql = { version = "7.0.17", features = ["chrono", "uuid", "dataloader"] }
-async-graphql-axum = "7.0.17"
-
-# Web framework
-axum = { version = "0.8.7", features = ["ws", "macros"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 
 # Data structures
-chrono = { version = "0.4.42", features = ["serde"] }
-url = "2.5.7"
-uuid = { version = "1.18.1", features = ["v4", "serde"] }
-
-# Streaming and messaging
-rdkafka = { version = "0.38.0", features = ["cmake-build"] }
-redis = { version = "0.32.7", features = ["tokio-comp", "connection-manager"] }
+chrono = { version = "0.4.45", features = ["serde"] }
+url = "2.5.8"
+uuid = { version = "1.26.1", features = ["v4", "serde"] }
 
 # Utilities
-async-trait = "0.1.89"
-futures = "0.3.31"
-hex = "0.4.3"
-parking_lot = "0.12.5"
-pin-project = "1.1.10"
-scc = "3.4.2"
-
-# WebSocket
-tokio-tungstenite = "0.28.0"
+async-trait = "0.1.92"
 
 # Development dependencies
-tempfile = "3.23.0"
+tempfile = "3.27.0"
+
+# ============================================================
+# Workspace-wide lint configuration
+# Each crate opts in via `[lints] workspace = true`.
+# ============================================================
+[workspace.lints.clippy]
+# Forbid error-prone and debugging patterns.
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+allow_attributes = "deny"
+# `unwrap`/`expect` are allowed at infallible-by-construction sites
+# (e.g. parsing a hardcoded default URL). New code should prefer `?`.
+unwrap_used = "allow"
+expect_used = "allow"
+
+[workspace.lints.rust]
+unused_must_use = "deny"
+
+[workspace.lints.rustdoc]
+all = "warn"
+
+# cargo-shear mis-classifies Sui git dependencies as unused because our crates
+# consume them through re-exports and `pub mod` boundaries. They are required,
+# so we exclude them from the unused-dependency check.
+[workspace.metadata.cargo-shear]
+ignored = [
+    "sui-config",
+    "sui-json-rpc-api",
+    "sui-json-rpc-types",
+    "sui-sdk",
+    "sui-sdk-types",
+]
+
+[profile.bench]
+debug = true
+
+[profile.dev]
+codegen-units = 16
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+
+[profile.release.build-override]
+opt-level = 3
+incremental = false
+codegen-units = 1

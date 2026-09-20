@@ -2,9 +2,7 @@ use clap::{Parser, Subcommand};
 use eyre::Result;
 use sui_indexer_config::ConfigLoader;
 use sui_indexer_core::IndexerCore;
-use tokio;
 use tracing::{error, info};
-use tracing_subscriber;
 
 #[derive(Parser)]
 #[command(name = "sui-indexer")]
@@ -123,7 +121,7 @@ fn get_memory_usage() -> Result<String> {
     {
         use std::process::Command;
         let output = Command::new("ps")
-            .args(&["-o", "rss=", "-p"])
+            .args(["-o", "rss=", "-p"])
             .arg(std::process::id().to_string())
             .output()?;
 

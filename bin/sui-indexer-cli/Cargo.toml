@@ -4,10 +4,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-homepage.workspace = true
 documentation.workspace = true
 authors.workspace = true
 description = "CLI interface for the Sui Indexer Framework"
+rust-version.workspace = true
+keywords = ["sui", "indexer", "cli", "blockchain", "web3"]
+categories = ["cryptography::blockchain", "command-line-utilities"]
+readme = "../../README.md"
 
 [[bin]]
 name = "sui-indexer"
@@ -28,3 +31,6 @@ tokio.workspace = true
 # Logging
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

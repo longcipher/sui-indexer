@@ -1,0 +1,20 @@
+# rumdl configuration for the Sui Indexer workspace.
+# We intentionally relax purely cosmetic rules so `just lint` stays green
+# without rewriting prose-heavy documentation.
+[MD013]
+enabled = false
+
+[MD031]
+enabled = false
+
+[MD032]
+enabled = false
+
+[MD036]
+enabled = false
+
+[MD040]
+enabled = false
+
+[MD041]
+enabled = false

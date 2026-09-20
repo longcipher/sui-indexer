@@ -3,8 +3,8 @@ use std::collections::HashSet;
 use sui_indexer_config::EventFilter;
 use sui_json_rpc_types::SuiEvent;
 use sui_types::{
-    base_types::{ObjectID, SuiAddress},
     Identifier,
+    base_types::{ObjectID, SuiAddress},
 };
 use tracing::debug;
 
