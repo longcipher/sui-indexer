@@ -23,7 +23,11 @@ sui-indexer-core = { path = "../../crates/sui-indexer-core" }
 
 # CLI dependencies
 clap.workspace = true
+clap_complete.workspace = true
 eyre.workspace = true
+serde_json.workspace = true
+sui-indexer-storage = { path = "../../crates/sui-indexer-storage" }
+sui-types.workspace = true
 
 # Async runtime
 tokio.workspace = true

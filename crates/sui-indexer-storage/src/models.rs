@@ -44,6 +44,47 @@ pub struct IndexerStateModel {
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// Unified pipeline watermark matching the official indexer-alt-framework
+/// semantics: committer high-water mark, reader lower bound, and pruner
+/// progress for a named pipeline.
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct WatermarkModel {
+    pub pipeline: String,
+    pub epoch_hi_inclusive: i64,
+    pub checkpoint_hi_inclusive: i64,
+    pub tx_hi: i64,
+    pub timestamp_ms_hi_inclusive: i64,
+    pub reader_lo: i64,
+    pub pruner_hi: i64,
+    pub pruner_timestamp: Option<chrono::DateTime<chrono::Utc>>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Checkpoint metadata row for the canonical checkpoints table.
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct CheckpointModel {
+    pub sequence_number: i64,
+    pub digest: String,
+    pub epoch: i64,
+    pub timestamp_ms: i64,
+    pub transaction_count: i64,
+    pub network_total_transactions: i64,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Object change row for the canonical objects table.
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct ObjectModel {
+    pub id: uuid::Uuid,
+    pub object_id: String,
+    pub version: i64,
+    pub digest: String,
+    pub checkpoint_sequence: i64,
+    pub transaction_digest: String,
+    pub sender: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
 /// Processed events tracking to avoid reprocessing
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct ProcessedEventModel {
@@ -200,6 +241,88 @@ impl ProcessedTransactionModel {
             processing_duration_ms,
             status,
             error_message,
+        }
+    }
+}
+
+/// Configuration for creating a new WatermarkModel
+#[derive(Debug)]
+pub struct WatermarkModelConfig {
+    pub pipeline: String,
+    pub epoch_hi_inclusive: i64,
+    pub checkpoint_hi_inclusive: i64,
+    pub tx_hi: i64,
+    pub timestamp_ms_hi_inclusive: i64,
+    pub reader_lo: i64,
+    pub pruner_hi: i64,
+}
+
+/// Configuration for creating a new CheckpointModel
+#[derive(Debug)]
+pub struct CheckpointModelConfig {
+    pub sequence_number: i64,
+    pub digest: String,
+    pub epoch: i64,
+    pub timestamp_ms: i64,
+    pub transaction_count: i64,
+    pub network_total_transactions: i64,
+}
+
+/// Configuration for creating a new ObjectModel
+#[derive(Debug)]
+pub struct ObjectModelConfig {
+    pub object_id: String,
+    pub version: i64,
+    pub digest: String,
+    pub checkpoint_sequence: i64,
+    pub transaction_digest: String,
+    pub sender: String,
+}
+
+impl WatermarkModel {
+    /// Create a new pipeline watermark
+    pub fn new(config: WatermarkModelConfig) -> Self {
+        Self {
+            pipeline: config.pipeline,
+            epoch_hi_inclusive: config.epoch_hi_inclusive,
+            checkpoint_hi_inclusive: config.checkpoint_hi_inclusive,
+            tx_hi: config.tx_hi,
+            timestamp_ms_hi_inclusive: config.timestamp_ms_hi_inclusive,
+            reader_lo: config.reader_lo,
+            pruner_hi: config.pruner_hi,
+            pruner_timestamp: None,
+            updated_at: chrono::Utc::now(),
+        }
+    }
+}
+
+impl CheckpointModel {
+    /// Create a new checkpoint row
+    pub fn new(config: CheckpointModelConfig) -> Self {
+        Self {
+            sequence_number: config.sequence_number,
+            digest: config.digest,
+            epoch: config.epoch,
+            timestamp_ms: config.timestamp_ms,
+            transaction_count: config.transaction_count,
+            network_total_transactions: config.network_total_transactions,
+            created_at: chrono::Utc::now(),
+        }
+    }
+}
+
+impl ObjectModel {
+    /// Create a new object change row
+    pub fn new(config: ObjectModelConfig) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4(),
+            object_id: config.object_id,
+            version: config.version,
+            digest: config.digest,
+            checkpoint_sequence: config.checkpoint_sequence,
+            transaction_digest: config.transaction_digest,
+            sender: config.sender,
+            created_at: chrono::Utc::now(),
         }
     }
 }

@@ -19,7 +19,7 @@ pub mod grpc_client;
 
 // Re-export the main types from checkpoint module
 pub use checkpoint::{CheckpointData, CheckpointProcessor, CheckpointRange, CheckpointStats};
-pub use grpc_client::{CheckpointSubscription, SuiGrpcClient};
+pub use grpc_client::{CheckpointSubscription, SuiGrpcClient, checkpoint_events};
 
 /// Event query result using pure gRPC types
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -64,6 +64,14 @@ impl SuiClient {
     /// Get the latest checkpoint sequence number
     pub async fn get_latest_checkpoint(&mut self) -> Result<u64> {
         self.grpc_client.get_latest_checkpoint().await
+    }
+
+    /// Get full checkpoint data by sequence number
+    pub async fn get_full_checkpoint(
+        &mut self,
+        sequence_number: u64,
+    ) -> Result<sui_types::full_checkpoint_content::Checkpoint> {
+        self.grpc_client.get_full_checkpoint(sequence_number).await
     }
 
     /// Get checkpoint data by sequence number

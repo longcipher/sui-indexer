@@ -1,6 +1,8 @@
 use eyre::Result;
 use sui_rpc_api::Client as SuiRpcApiClient;
+use sui_types::effects::TransactionEffectsAPI;
 use sui_types::messages_checkpoint::CheckpointSequenceNumber;
+use sui_types::transaction::TransactionDataAPI;
 use tracing::{debug, error, info};
 
 use super::{CheckpointData, Event, EventQueryResult};
@@ -55,6 +57,24 @@ impl SuiGrpcClient {
         Ok(sequence_number)
     }
 
+    /// Get full checkpoint data by sequence number.
+    ///
+    /// Uses the gRPC `LedgerService::getCheckpoint` API with a read mask that
+    /// covers summary, contents, transactions (transaction, effects, events)
+    /// and objects, then converts the proto response into
+    /// `sui_types::full_checkpoint_content::Checkpoint`.
+    pub async fn get_full_checkpoint(
+        &mut self,
+        sequence_number: CheckpointSequenceNumber,
+    ) -> Result<sui_types::full_checkpoint_content::Checkpoint> {
+        debug!("Fetching full checkpoint {} from gRPC", sequence_number);
+
+        self.client
+            .get_full_checkpoint(sequence_number)
+            .await
+            .map_err(|e| eyre::eyre!("Failed to get full checkpoint {sequence_number}: {e}"))
+    }
+
     /// Get checkpoint data by sequence number
     pub async fn get_checkpoint(
         &self,
@@ -62,26 +82,13 @@ impl SuiGrpcClient {
     ) -> Result<CheckpointData> {
         debug!("Fetching checkpoint {} from gRPC", sequence_number);
 
-        // For now, create a placeholder checkpoint data structure
-        // This will be implemented with actual gRPC calls once the API is stable
-        let checkpoint_data = CheckpointData {
-            sequence_number,
-            digest: sui_types::digests::CheckpointDigest::default().to_string(),
-            previous_digest: Some(sui_types::digests::CheckpointDigest::default().to_string()),
-            transactions: vec![],
-            timestamp_ms: 0,
-            epoch: 0,
-            network_total_transactions: 0,
-            end_of_epoch_data: None,
-            validator_signature: sui_types::committee::StakeUnit::default().to_string(),
-            round: 0,
-        };
+        let mut client = self.client.clone();
+        let checkpoint = client
+            .get_full_checkpoint(sequence_number)
+            .await
+            .map_err(|e| eyre::eyre!("Failed to get full checkpoint {sequence_number}: {e}"))?;
 
-        debug!(
-            "Retrieved checkpoint {} (placeholder implementation)",
-            sequence_number
-        );
-        Ok(checkpoint_data)
+        Ok(CheckpointData::from_full_checkpoint(&checkpoint))
     }
 
     /// Subscribe to checkpoint stream (placeholder for future streaming implementation)
@@ -95,71 +102,99 @@ impl SuiGrpcClient {
         Ok(CheckpointSubscription { start_sequence })
     }
 
-    /// Query events by filter (using gRPC native types)
+    /// Query events by filter.
+    ///
+    /// Checkpoint-anchored scan: for the requested checkpoint window the
+    /// client pulls full checkpoints in pages and extracts events locally,
+    /// applying package / sender filters. This avoids the simulated-event
+    /// path and returns real on-chain events.
     pub async fn query_events(
         &mut self,
         _transaction_digest: Option<String>,
-        _sender: Option<String>,
+        sender: Option<String>,
         package_id: Option<String>,
-        _cursor: Option<String>,
-        _limit: Option<usize>,
-        _descending_order: bool,
+        cursor: Option<String>,
+        limit: Option<usize>,
+        descending_order: bool,
     ) -> Result<EventQueryResult> {
-        debug!("Querying events from gRPC");
+        self.query_events_in_checkpoints(sender, package_id, cursor, limit, descending_order)
+            .await
+    }
 
-        if let Some(pkg_id) = &package_id {
-            info!("🔍 Searching for events from package: {}", pkg_id);
+    /// Scan a checkpoint window for events and apply local filters.
+    ///
+    /// `cursor` encodes the start checkpoint sequence as a decimal string.
+    /// The window covers at most `scan_window` checkpoints ending at the
+    /// latest checkpoint (ascending) or starting at it (descending).
+    pub async fn query_events_in_checkpoints(
+        &mut self,
+        sender: Option<String>,
+        package_id: Option<String>,
+        cursor: Option<String>,
+        limit: Option<usize>,
+        descending_order: bool,
+    ) -> Result<EventQueryResult> {
+        const SCAN_WINDOW: u64 = 20;
+        let limit = limit.unwrap_or(50).min(500);
+
+        let latest = self.get_latest_checkpoint().await?;
+        let start: u64 = cursor
+            .as_deref()
+            .and_then(|c| c.parse().ok())
+            .unwrap_or_else(|| latest.saturating_sub(SCAN_WINDOW.saturating_sub(1)));
+
+        let mut sequences: Vec<u64> =
+            (start..=latest.min(start.saturating_add(SCAN_WINDOW))).collect();
+        if descending_order {
+            sequences.reverse();
         }
 
-        // Get latest checkpoint to show we're actively monitoring
-        let latest_checkpoint = self.get_latest_checkpoint().await?;
+        let mut events = Vec::new();
+        let mut scanned = start;
+        for seq in sequences {
+            scanned = seq;
+            let checkpoint = match self.get_full_checkpoint(seq).await {
+                Ok(checkpoint) => checkpoint,
+                Err(e) => {
+                    debug!("Skipping checkpoint {seq}: {e}");
+                    continue;
+                }
+            };
+            for event in checkpoint_events(&checkpoint, seq) {
+                if let Some(filter) = &package_id
+                    && event.package_id.as_deref().is_none_or(|id| {
+                        id != filter && !id.ends_with(filter.trim_start_matches("0x"))
+                    })
+                {
+                    continue;
+                }
+                if let Some(filter) = &sender
+                    && event.sender.as_deref() != Some(filter.as_str())
+                {
+                    continue;
+                }
+                events.push(event);
+                if events.len() >= limit {
+                    break;
+                }
+            }
+            if events.len() >= limit {
+                break;
+            }
+        }
+
+        let has_next_page = scanned < latest && events.len() >= limit;
+        let next_cursor = has_next_page.then(|| (scanned.saturating_add(1)).to_string());
+
         info!(
-            "📊 Latest checkpoint: {}, monitoring for new events",
-            latest_checkpoint
+            "Scanned checkpoints {start}..={scanned} (latest {latest}), found {} events",
+            events.len()
         );
 
-        // For now, simulate event discovery to test the monitoring loop
-        // In a real implementation, this would query actual events from the blockchain
-        let mut simulated_events = Vec::new();
-
-        // Simulate finding some events (for testing the monitoring system)
-        if package_id.as_deref()
-            == Some("0x81c408448d0d57b3e371ea94de1d40bf852784d3e225de1e74acab3e8395c18f")
-        {
-            info!("� SIMULATING: Navi Protocol package detected in query!");
-
-            // Create a simulated event for testing
-            let simulated_event = Event {
-                event_type: Some("DepositEvent".to_string()),
-                package_id: Some("0x81c408448d0d57b3e371ea94de1d40bf852784d3e225de1e74acab3e8395c18f".to_string()),
-                transaction_module: Some("lending".to_string()),
-                sender: Some("0x1234567890abcdef".to_string()),
-                type_: Some("0xd899cf7d2b5db716bd2cf55599fb0d5ee38a3061e7b6bb6eebf73fa5bc4c81ca::lending::DepositEvent".to_string()),
-                contents: Some(serde_json::json!({
-                    "amount": "1000000000",
-                    "coin_type": "0x2::sui::SUI",
-                    "user": "0x1234567890abcdef"
-                })),
-                bcs: None,
-            };
-
-            simulated_events.push(simulated_event);
-            info!("🧪 SIMULATION: Created test Navi Protocol event");
-        }
-
-        if simulated_events.is_empty() {
-            info!("📭 No events found (monitoring system is working, waiting for real events)");
-        } else {
-            info!(
-                "� Found {} simulated events for testing",
-                simulated_events.len()
-            );
-        }
-
         Ok(EventQueryResult {
-            data: simulated_events,
-            next_cursor: None,
-            has_next_page: false,
+            data: events,
+            next_cursor,
+            has_next_page,
         })
     }
 
@@ -196,4 +231,37 @@ impl std::fmt::Debug for SuiGrpcClient {
             .field("endpoint", &self.endpoint)
             .finish()
     }
+}
+
+/// Extract gRPC-native events from a full checkpoint with checkpoint context.
+pub fn checkpoint_events(
+    checkpoint: &sui_types::full_checkpoint_content::Checkpoint,
+    sequence_number: u64,
+) -> Vec<Event> {
+    let mut events = Vec::new();
+    for transaction in &checkpoint.transactions {
+        let sender = transaction.transaction.sender().to_string();
+        let digest = transaction.effects.transaction_digest().to_string();
+        if let Some(transaction_events) = &transaction.events {
+            for (index, event) in transaction_events.data.iter().enumerate() {
+                let type_ = event.type_.to_canonical_string(true);
+                events.push(Event {
+                    event_type: Some(event.type_.name.to_string()),
+                    package_id: Some(event.package_id.to_string()),
+                    transaction_module: Some(event.transaction_module.to_string()),
+                    sender: Some(sender.clone()),
+                    type_: Some(type_),
+                    contents: Some(serde_json::json!({
+                        "checkpoint": sequence_number,
+                        "transaction_digest": digest,
+                        "event_index": index,
+                        "sender": sender,
+                        "package_id": event.package_id.to_string(),
+                    })),
+                    bcs: Some(event.contents.clone()),
+                });
+            }
+        }
+    }
+    events
 }

@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use eyre::Result;
+use futures::stream::{self, StreamExt};
 use sui_json_rpc_types::{SuiEvent, SuiTransactionBlockEffectsAPI, SuiTransactionBlockResponse};
 use tokio::time::Instant;
 use tracing::{debug, info, warn};
@@ -186,34 +187,50 @@ impl BatchProcessor {
         Ok(processed_transaction)
     }
 
-    /// Process events in optimally sized batches
+    /// Process events in optimally sized batches with bounded concurrency.
     pub async fn process_events_in_batches(
         &self,
         events: Vec<SuiEvent>,
     ) -> Result<Vec<ProcessedEvent>> {
-        let mut all_processed = Vec::new();
+        let chunks: Vec<Vec<SuiEvent>> = events
+            .chunks(self.batch_size)
+            .map(<[SuiEvent]>::to_vec)
+            .collect();
+        let concurrency = self.batch_concurrency().max(1);
 
-        for chunk in events.chunks(self.batch_size) {
-            let batch_result = self.process_event_batch(chunk.to_vec()).await?;
-            all_processed.extend(batch_result);
-        }
-
-        Ok(all_processed)
+        stream::iter(chunks)
+            .map(|chunk| self.process_event_batch(chunk))
+            .buffer_unordered(concurrency)
+            .collect::<Vec<Result<Vec<ProcessedEvent>>>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<Vec<ProcessedEvent>>>>()
+            .map(|batches| batches.into_iter().flatten().collect())
     }
 
-    /// Process transactions in optimally sized batches
+    /// Process transactions in optimally sized batches with bounded concurrency.
     pub async fn process_transactions_in_batches(
         &self,
         transactions: Vec<SuiTransactionBlockResponse>,
     ) -> Result<Vec<ProcessedTransaction>> {
-        let mut all_processed = Vec::new();
+        let chunks: Vec<Vec<SuiTransactionBlockResponse>> = transactions
+            .chunks(self.batch_size)
+            .map(<[SuiTransactionBlockResponse]>::to_vec)
+            .collect();
+        let concurrency = self.batch_concurrency().max(1);
 
-        for chunk in transactions.chunks(self.batch_size) {
-            let batch_result = self.process_transaction_batch(chunk.to_vec()).await?;
-            all_processed.extend(batch_result);
-        }
+        stream::iter(chunks)
+            .map(|chunk| self.process_transaction_batch(chunk))
+            .buffer_unordered(concurrency)
+            .collect::<Vec<Result<Vec<ProcessedTransaction>>>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<Vec<ProcessedTransaction>>>>()
+            .map(|batches| batches.into_iter().flatten().collect())
+    }
 
-        Ok(all_processed)
+    fn batch_concurrency(&self) -> usize {
+        4
     }
 }
 

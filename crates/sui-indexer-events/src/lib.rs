@@ -10,11 +10,13 @@ use uuid::Uuid;
 pub mod batch;
 pub mod filter;
 pub mod processor;
+pub mod protocols;
 pub mod transformer;
 
 pub use batch::*;
 pub use filter::*;
 pub use processor::*;
+pub use protocols::*;
 pub use transformer::*;
 
 /// Processed event with additional metadata

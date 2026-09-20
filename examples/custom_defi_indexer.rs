@@ -28,7 +28,15 @@ impl DeFiEventProcessor {
                 .to_string(),
         }
     }
+}
 
+impl Default for DeFiEventProcessor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl DeFiEventProcessor {
     /// Handle Navi Protocol specific events
     async fn handle_navi_event(&self, event: &SuiEvent) -> Result<()> {
         let event_type = &event.type_.name;
@@ -160,14 +168,9 @@ impl DeFiEventProcessor {
     /// Extract field from parsed JSON
     fn extract_field(&self, json: &Value, field: &str) -> Option<String> {
         json.get(field).and_then(|v| {
-            // Try string first
-            if let Some(s) = v.as_str() {
-                Some(s.to_string())
-            } else if let Some(n) = v.as_number() {
-                Some(n.to_string())
-            } else {
-                None
-            }
+            v.as_str()
+                .map(str::to_string)
+                .or_else(|| v.as_number().map(|n| n.to_string()))
         })
     }
 

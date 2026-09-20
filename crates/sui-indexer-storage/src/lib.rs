@@ -11,6 +11,38 @@ pub mod postgres;
 pub use models::*;
 pub use postgres::PostgresStorage;
 
+/// Filter bundle for event queries.
+#[derive(Debug, Clone, Default)]
+pub struct EventQueryFilter<'a> {
+    /// Package ID filter.
+    pub package: Option<&'a str>,
+    /// Module filter.
+    pub module: Option<&'a str>,
+    /// Event type filter.
+    pub event_type: Option<&'a str>,
+    /// Sender filter.
+    pub sender: Option<&'a str>,
+    /// First checkpoint (inclusive).
+    pub from_checkpoint: Option<u64>,
+    /// Last checkpoint (inclusive).
+    pub to_checkpoint: Option<u64>,
+    /// Max rows.
+    pub limit: u64,
+}
+
+/// Filter bundle for transaction queries.
+#[derive(Debug, Clone, Default)]
+pub struct TransactionQueryFilter<'a> {
+    /// Sender filter.
+    pub sender: Option<&'a str>,
+    /// First checkpoint (inclusive).
+    pub from_checkpoint: Option<u64>,
+    /// Last checkpoint (inclusive).
+    pub to_checkpoint: Option<u64>,
+    /// Max rows.
+    pub limit: u64,
+}
+
 /// Storage trait for different backend implementations
 #[async_trait::async_trait]
 pub trait Storage: Send + Sync {
@@ -55,6 +87,36 @@ pub trait Storage: Send + Sync {
     async fn update_last_processed_checkpoint(&self, checkpoint: u64) -> Result<()> {
         self.update_checkpoint_progress(checkpoint).await
     }
+
+    /// Store canonical transaction rows with real senders and gas.
+    async fn store_transaction_models(&self, transactions: Vec<TransactionModel>) -> Result<()>;
+
+    /// Store canonical object change rows.
+    async fn store_object_models(&self, objects: Vec<ObjectModel>) -> Result<()>;
+
+    /// Store a canonical checkpoint row.
+    async fn store_checkpoint_model(&self, checkpoint: CheckpointModel) -> Result<()>;
+
+    /// Read a pipeline watermark.
+    async fn get_watermark(&self, pipeline: &str) -> Result<Option<WatermarkModel>>;
+
+    /// Advance a pipeline watermark (never regresses).
+    async fn set_watermark(&self, watermark: WatermarkModel) -> Result<bool>;
+
+    /// Prune canonical tables below the retention window. Returns pruned rows.
+    async fn prune_checkpoints(&self, latest: u64, retention: u64) -> Result<u64>;
+
+    /// Rewind a pipeline watermark for replay.
+    async fn rewind_watermark(&self, pipeline: &str, checkpoint: u64) -> Result<()>;
+
+    /// Query events with optional filters for the HTTP API.
+    async fn query_events(&self, filter: EventQueryFilter<'_>) -> Result<Vec<ProcessedEvent>>;
+
+    /// Query transactions with optional filters for the HTTP API.
+    async fn query_transactions(
+        &self,
+        filter: TransactionQueryFilter<'_>,
+    ) -> Result<Vec<ProcessedTransaction>>;
 
     /// Health check for storage backend
     async fn health_check(&self) -> Result<bool>;
@@ -131,6 +193,57 @@ impl StorageManager {
         self.backend
             .update_last_processed_checkpoint(checkpoint)
             .await
+    }
+
+    /// Store canonical transaction rows with real senders and gas.
+    pub async fn store_transaction_models(
+        &self,
+        transactions: Vec<TransactionModel>,
+    ) -> Result<()> {
+        self.backend.store_transaction_models(transactions).await
+    }
+
+    /// Store canonical object change rows.
+    pub async fn store_object_models(&self, objects: Vec<ObjectModel>) -> Result<()> {
+        self.backend.store_object_models(objects).await
+    }
+
+    /// Store a canonical checkpoint row.
+    pub async fn store_checkpoint_model(&self, checkpoint: CheckpointModel) -> Result<()> {
+        self.backend.store_checkpoint_model(checkpoint).await
+    }
+
+    /// Read a pipeline watermark.
+    pub async fn get_watermark(&self, pipeline: &str) -> Result<Option<WatermarkModel>> {
+        self.backend.get_watermark(pipeline).await
+    }
+
+    /// Advance a pipeline watermark (never regresses).
+    pub async fn set_watermark(&self, watermark: WatermarkModel) -> Result<bool> {
+        self.backend.set_watermark(watermark).await
+    }
+
+    /// Prune canonical tables below the retention window.
+    pub async fn prune_checkpoints(&self, latest: u64, retention: u64) -> Result<u64> {
+        self.backend.prune_checkpoints(latest, retention).await
+    }
+
+    /// Rewind a pipeline watermark for replay.
+    pub async fn rewind_watermark(&self, pipeline: &str, checkpoint: u64) -> Result<()> {
+        self.backend.rewind_watermark(pipeline, checkpoint).await
+    }
+
+    /// Query events with optional filters for the HTTP API.
+    pub async fn query_events(&self, filter: EventQueryFilter<'_>) -> Result<Vec<ProcessedEvent>> {
+        self.backend.query_events(filter).await
+    }
+
+    /// Query transactions with optional filters for the HTTP API.
+    pub async fn query_transactions(
+        &self,
+        filter: TransactionQueryFilter<'_>,
+    ) -> Result<Vec<ProcessedTransaction>> {
+        self.backend.query_transactions(filter).await
     }
 
     /// Health check

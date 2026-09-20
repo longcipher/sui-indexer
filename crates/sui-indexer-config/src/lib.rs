@@ -13,6 +13,14 @@ pub struct IndexerConfig {
     pub database: DatabaseConfig,
     /// Event indexing configuration
     pub events: EventsConfig,
+    /// HTTP query API configuration
+    pub api: ApiConfig,
+    /// Webhook sinks for event push
+    pub sinks: Vec<WebhookSink>,
+    /// Threshold alert rules
+    pub alerts: Vec<AlertRule>,
+    /// Protocol presets for tagging
+    pub protocols: Vec<ProtocolPreset>,
 }
 
 /// Network configuration for Sui blockchain connection
@@ -50,16 +58,35 @@ pub struct DatabaseConfig {
 pub struct EventsConfig {
     /// Starting checkpoint for indexing
     pub start_checkpoint: Option<u64>,
+    /// Last checkpoint for backfill runs (inclusive). `None` means follow the tip.
+    pub last_checkpoint: Option<u64>,
     /// Number of events to process in a batch
     pub batch_size: usize,
     /// Maximum concurrent event processors
     pub max_concurrent_batches: usize,
+    /// Poll interval in seconds when running in poll ingestion mode
+    pub poll_interval_secs: u64,
+    /// Ingestion mode: `stream` (subscription + backfill) or `poll`
+    pub ingestion_mode: IngestionMode,
     /// Event filters to apply
     pub filters: Vec<EventFilter>,
     /// Whether to index transaction effects
     pub index_transactions: bool,
     /// Whether to index object changes
     pub index_objects: bool,
+    /// Checkpoint retention for pruning. `None` disables pruning.
+    pub retention: Option<u64>,
+}
+
+/// Ingestion mode for pulling checkpoint data.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum IngestionMode {
+    /// Follow the tip via subscription-style streaming with backfill catch-up.
+    #[default]
+    Stream,
+    /// Poll `get_latest_checkpoint` on a fixed interval.
+    Poll,
 }
 
 /// Event filter configuration
@@ -99,6 +126,50 @@ pub struct RetryConfig {
     pub backoff_multiplier: f64,
 }
 
+/// HTTP query API configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiConfig {
+    /// Enable the HTTP query API.
+    pub enabled: bool,
+    /// Bind address for the HTTP server.
+    pub listen: String,
+}
+
+/// Webhook sink configuration for event push.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebhookSink {
+    /// Sink name.
+    pub name: String,
+    /// Target URL.
+    pub url: String,
+    /// Optional package allowlist (empty means all packages).
+    pub packages: Vec<String>,
+    /// Optional bearer token sent as Authorization header.
+    pub bearer_token: Option<String>,
+}
+
+/// Threshold alert rule configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AlertRule {
+    /// Rule name.
+    pub name: String,
+    /// Package to watch (empty means all packages).
+    pub package: String,
+    /// Minimum matching events in a checkpoint to trigger.
+    pub min_events_per_checkpoint: u64,
+}
+
+/// Protocol preset configuration for the protocol registry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProtocolPreset {
+    /// Protocol name (e.g. `navi`, `cetus`, `deepbook`).
+    pub name: String,
+    /// Package IDs belonging to the protocol.
+    pub packages: Vec<String>,
+    /// Tags attached to matched events.
+    pub tags: Vec<String>,
+}
+
 impl Default for NetworkConfig {
     fn default() -> Self {
         Self {
@@ -129,11 +200,15 @@ impl Default for EventsConfig {
     fn default() -> Self {
         Self {
             start_checkpoint: None,
+            last_checkpoint: None,
             batch_size: 100,
             max_concurrent_batches: 10,
+            poll_interval_secs: 10,
+            ingestion_mode: IngestionMode::Stream,
             filters: vec![],
             index_transactions: true,
             index_objects: true,
+            retention: None,
         }
     }
 }
@@ -155,6 +230,15 @@ impl Default for RetryConfig {
             initial_delay: 1000,
             max_delay: 10000,
             backoff_multiplier: 2.0,
+        }
+    }
+}
+
+impl Default for ApiConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            listen: "127.0.0.1:8080".to_string(),
         }
     }
 }
@@ -234,6 +318,8 @@ mod tests {
         assert_eq!(config.network.network, "testnet");
         assert_eq!(config.database.max_connections, 20);
         assert_eq!(config.events.batch_size, 100);
+        assert_eq!(config.events.ingestion_mode, IngestionMode::Stream);
+        assert!(!config.api.enabled);
     }
 
     #[test]

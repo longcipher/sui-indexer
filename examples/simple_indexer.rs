@@ -17,6 +17,12 @@ impl SimpleEventProcessor {
     }
 }
 
+impl Default for SimpleEventProcessor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait]
 impl EventProcessor for SimpleEventProcessor {
     async fn process_event(&self, event: SuiEvent) -> Result<ProcessedEvent> {

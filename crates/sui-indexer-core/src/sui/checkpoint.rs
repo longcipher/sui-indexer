@@ -1,6 +1,8 @@
 use eyre::Result;
 use serde::{Deserialize, Serialize};
 use sui_types::base_types::TransactionDigest;
+use sui_types::effects::TransactionEffectsAPI;
+use sui_types::transaction::TransactionDataAPI;
 
 /// Checkpoint data structure
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,6 +47,56 @@ pub struct CommitteeMember {
     pub authority_name: String,
     /// Stake amount
     pub stake: u64,
+}
+
+impl CheckpointData {
+    /// Build checkpoint metadata from a full gRPC checkpoint.
+    pub fn from_full_checkpoint(
+        checkpoint: &sui_types::full_checkpoint_content::Checkpoint,
+    ) -> Self {
+        let summary = checkpoint.summary.data();
+        Self {
+            sequence_number: summary.sequence_number,
+            digest: checkpoint.summary.digest().to_string(),
+            previous_digest: summary.previous_digest.map(|digest| digest.to_string()),
+            epoch: summary.epoch,
+            round: 0,
+            timestamp_ms: summary.timestamp_ms,
+            network_total_transactions: summary.network_total_transactions,
+            transactions: checkpoint
+                .transactions
+                .iter()
+                .map(|transaction| *transaction.effects.transaction_digest())
+                .collect(),
+            end_of_epoch_data: summary
+                .end_of_epoch_data
+                .as_ref()
+                .map(|data| EndOfEpochData {
+                    next_epoch_committee: data
+                        .next_epoch_committee
+                        .iter()
+                        .map(|(authority, stake)| CommitteeMember {
+                            authority_name: authority.to_string(),
+                            stake: *stake,
+                        })
+                        .collect(),
+                    next_epoch_protocol_version: data.next_epoch_protocol_version.as_u64(),
+                    epoch_start_timestamp_ms: 0,
+                }),
+            validator_signature: String::new(),
+        }
+    }
+
+    /// Sender addresses for every transaction in a full checkpoint.
+    pub fn transaction_senders(
+        checkpoint: &sui_types::full_checkpoint_content::Checkpoint,
+    ) -> Vec<String> {
+        checkpoint
+            .transactions
+            .iter()
+            .map(|transaction| transaction.transaction.sender().to_string())
+            .collect()
+    }
 }
 
 /// Checkpoint processor for managing checkpoint synchronization

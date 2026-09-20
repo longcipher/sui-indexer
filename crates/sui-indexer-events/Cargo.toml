@@ -41,5 +41,8 @@ uuid.workspace = true
 # Tracing
 tracing.workspace = true
 
+# Concurrent batch processing
+futures.workspace = true
+
 [lints]
 workspace = true

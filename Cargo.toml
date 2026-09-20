@@ -56,6 +56,7 @@ thiserror = "2.0.20"
 
 # CLI
 clap = { version = "4.6.7", features = ["derive", "env", "color"] }
+clap_complete = "4.6.0"
 
 # Configuration
 config = "0.15.25"
@@ -71,6 +72,10 @@ uuid = { version = "1.26.1", features = ["v4", "serde"] }
 
 # Utilities
 async-trait = "0.1.92"
+futures = "0.3.34"
+
+# HTTP API
+axum = { version = "0.8.9", features = ["tokio", "http1", "json", "query"] }
 
 # Development dependencies
 tempfile = "3.27.0"
@@ -103,13 +108,7 @@ all = "warn"
 # consume them through re-exports and `pub mod` boundaries. They are required,
 # so we exclude them from the unused-dependency check.
 [workspace.metadata.cargo-shear]
-ignored = [
-    "sui-config",
-    "sui-json-rpc-api",
-    "sui-json-rpc-types",
-    "sui-sdk",
-    "sui-sdk-types",
-]
+ignored = ["sui-config", "sui-json-rpc-api", "sui-sdk", "sui-sdk-types"]
 
 [profile.bench]
 debug = true
