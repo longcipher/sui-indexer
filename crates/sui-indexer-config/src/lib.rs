@@ -13,6 +13,14 @@ pub struct IndexerConfig {
     pub database: DatabaseConfig,
     /// Event indexing configuration
     pub events: EventsConfig,
+    /// Sync engine configuration (tracker + backfiller + repair worker)
+    pub sync: SyncConfig,
+    /// Repair queue configuration
+    pub repair: RepairConfig,
+    /// Cold archive configuration
+    pub archive: ArchiveConfig,
+    /// Read-only SQL gateway configuration
+    pub query: QueryConfig,
     /// HTTP query API configuration
     pub api: ApiConfig,
     /// Webhook sinks for event push
@@ -223,6 +231,55 @@ impl Default for PoolConfig {
     }
 }
 
+impl Default for SyncConfig {
+    fn default() -> Self {
+        Self {
+            tip_interval_secs: 2,
+            tracker_batch_size: 50,
+            backfill_enabled: true,
+            backfill_batch_size: 200,
+            backfill_concurrency: 8,
+            lag_yield_threshold: 10,
+            max_range_span: 200,
+            failure_backoff_threshold: 5,
+        }
+    }
+}
+
+impl Default for RepairConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            poll_interval_secs: 30,
+            batch_size: 20,
+            max_attempts: 10,
+            backoff_base_secs: 30,
+            backoff_max_secs: 3600,
+        }
+    }
+}
+
+impl Default for ArchiveConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            directory: "./archive".to_string(),
+            segment_size: 10_000,
+            hot_keep_checkpoints: None,
+        }
+    }
+}
+
+impl Default for QueryConfig {
+    fn default() -> Self {
+        Self {
+            max_rows: 1000,
+            timeout_ms: 5000,
+            max_bytes: 10 * 1024 * 1024,
+        }
+    }
+}
+
 impl Default for RetryConfig {
     fn default() -> Self {
         Self {
@@ -241,6 +298,70 @@ impl Default for ApiConfig {
             listen: "127.0.0.1:8080".to_string(),
         }
     }
+}
+
+/// Dual-lane sync engine configuration: a tip tracker follows the chain
+/// head while a backfiller heals historical gaps newest-first.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncConfig {
+    /// Poll interval in seconds for the tip tracker.
+    pub tip_interval_secs: u64,
+    /// Max checkpoints per tracker tick.
+    pub tracker_batch_size: u64,
+    /// Enable the historical backfiller lane.
+    pub backfill_enabled: bool,
+    /// Max checkpoints per backfiller tick.
+    pub backfill_batch_size: u64,
+    /// Max concurrent checkpoint fetches in the backfiller.
+    pub backfill_concurrency: usize,
+    /// Yield to the tracker when tip lag exceeds this many checkpoints.
+    pub lag_yield_threshold: u64,
+    /// Max single process_checkpoint_range span; larger spans split into chunks.
+    pub max_range_span: u64,
+    /// Consecutive failures after which the engine backs off a full interval.
+    pub failure_backoff_threshold: u32,
+}
+
+/// Background repair worker configuration for checkpoints that failed to
+/// ingest cleanly (durable queue with exponential backoff).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RepairConfig {
+    /// Enable the repair worker.
+    pub enabled: bool,
+    /// Poll interval in seconds.
+    pub poll_interval_secs: u64,
+    /// Max rows claimed per poll.
+    pub batch_size: usize,
+    /// Max attempts per checkpoint before parking it.
+    pub max_attempts: i32,
+    /// Base backoff in seconds, doubled per attempt up to the cap.
+    pub backoff_base_secs: u64,
+    /// Max backoff in seconds.
+    pub backoff_max_secs: u64,
+}
+
+/// Cold archive configuration for full-history retention outside PostgreSQL.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArchiveConfig {
+    /// Enable the archive writer.
+    pub enabled: bool,
+    /// Filesystem directory (or object prefix) for archive segments.
+    pub directory: String,
+    /// Archive segment after this many checkpoints per file.
+    pub segment_size: u64,
+    /// Keep PostgreSQL rows for at least this many checkpoints.
+    pub hot_keep_checkpoints: Option<u64>,
+}
+
+/// Read-only SQL gateway configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryConfig {
+    /// Max rows a single query may return.
+    pub max_rows: u64,
+    /// Query timeout in milliseconds.
+    pub timeout_ms: u64,
+    /// Max response payload in bytes before truncation.
+    pub max_bytes: usize,
 }
 
 /// Configuration loader
@@ -356,5 +477,30 @@ mod tests {
         assert!(!example.is_empty());
         assert!(example.contains("[network]"));
         assert!(example.contains("[database]"));
+    }
+
+    #[test]
+    fn test_sync_repair_archive_query_defaults() {
+        let config = IndexerConfig::default();
+        assert!(config.sync.backfill_enabled);
+        assert_eq!(config.sync.tip_interval_secs, 2);
+        assert!(config.repair.enabled);
+        assert_eq!(config.repair.max_attempts, 10);
+        assert!(!config.archive.enabled);
+        assert_eq!(config.query.max_rows, 1000);
+        assert_eq!(config.query.timeout_ms, 5000);
+    }
+
+    #[test]
+    fn test_new_sections_roundtrip() {
+        let config = IndexerConfig::default();
+        let toml_str = toml::to_string(&config).unwrap();
+        assert!(toml_str.contains("[sync]"));
+        assert!(toml_str.contains("[repair]"));
+        assert!(toml_str.contains("[archive]"));
+        assert!(toml_str.contains("[query]"));
+        let restored: IndexerConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(restored.sync.backfill_batch_size, 200);
+        assert_eq!(restored.query.max_bytes, 10 * 1024 * 1024);
     }
 }

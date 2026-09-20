@@ -43,6 +43,32 @@ pub struct TransactionQueryFilter<'a> {
     pub limit: u64,
 }
 
+/// Row counts per canonical table for status output.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TableCounts {
+    /// Stored checkpoints.
+    pub checkpoints: u64,
+    /// Stored canonical transactions.
+    pub transactions: u64,
+    /// Stored canonical events.
+    pub events: u64,
+    /// Stored object changes.
+    pub objects: u64,
+}
+
+/// Read-only SQL gateway result shared with the core query layer.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct GatewayResult {
+    /// Column names.
+    pub columns: Vec<String>,
+    /// Rows as JSON values.
+    pub rows: Vec<serde_json::Value>,
+    /// Rows returned.
+    pub row_count: usize,
+    /// Whether output was truncated.
+    pub truncated: bool,
+}
+
 /// Storage trait for different backend implementations
 #[async_trait::async_trait]
 pub trait Storage: Send + Sync {
@@ -97,6 +123,58 @@ pub trait Storage: Send + Sync {
     /// Store a canonical checkpoint row.
     async fn store_checkpoint_model(&self, checkpoint: CheckpointModel) -> Result<()>;
 
+    /// Store canonical decoded event rows with BCS bytes as BYTEA.
+    async fn store_canonical_events(&self, events: Vec<CanonicalEventModel>) -> Result<()>;
+
+    /// Store balance insight flow rows derived from coin object changes.
+    async fn store_coin_flows(&self, flows: Vec<CoinFlowModel>) -> Result<()>;
+
+    /// Claim due repair queue entries with SKIP LOCKED.
+    async fn claim_repair_entries(&self, limit: usize) -> Result<Vec<RepairQueueEntry>>;
+
+    /// Enqueue a checkpoint for background repair.
+    async fn enqueue_repair(&self, checkpoint: u64, error: &str) -> Result<()>;
+
+    /// Mark a repair attempt complete (delete) or reschedule with backoff.
+    async fn complete_repair(
+        &self,
+        checkpoint: u64,
+        success: bool,
+        error: Option<&str>,
+        max_attempts: i32,
+        backoff_secs: u64,
+    ) -> Result<()>;
+
+    /// Read the converged indexer progress row.
+    async fn get_progress(&self, pipeline: &str) -> Result<Option<IndexerProgressModel>>;
+
+    /// Advance the continuous checkpoint (contiguous-commit only).
+    async fn advance_continuous(
+        &self,
+        pipeline: &str,
+        continuous: u64,
+        floor: u64,
+        digest: Option<&str>,
+    ) -> Result<()>;
+
+    /// Record the archive interval and hot boundary.
+    async fn record_archive_window(
+        &self,
+        pipeline: &str,
+        archive_lo: Option<u64>,
+        archive_hi: Option<u64>,
+        hot_boundary: Option<u64>,
+    ) -> Result<()>;
+
+    /// Detect missing checkpoint sequences in [floor, tip].
+    async fn detect_gaps(&self, floor: u64, tip: u64) -> Result<Vec<(u64, u64)>>;
+
+    /// Fetch stored checkpoint digests in a range for verification.
+    async fn checkpoint_digests(&self, start: u64, end: u64) -> Result<Vec<(u64, String)>>;
+
+    /// Row counts per canonical table (no full scans beyond COUNT).
+    async fn table_counts(&self) -> Result<TableCounts>;
+
     /// Read a pipeline watermark.
     async fn get_watermark(&self, pipeline: &str) -> Result<Option<WatermarkModel>>;
 
@@ -117,6 +195,12 @@ pub trait Storage: Send + Sync {
         &self,
         filter: TransactionQueryFilter<'_>,
     ) -> Result<Vec<ProcessedTransaction>>;
+
+    /// Execute a validated read-only SQL statement with row/byte caps.
+    async fn sql_query(&self, sql: &str, limit: u64, max_bytes: usize) -> Result<GatewayResult>;
+
+    /// Refresh derived balance snapshots and coin metadata from flows.
+    async fn repair_derived_insights(&self) -> Result<()>;
 
     /// Health check for storage backend
     async fn health_check(&self) -> Result<bool>;
@@ -213,6 +297,86 @@ impl StorageManager {
         self.backend.store_checkpoint_model(checkpoint).await
     }
 
+    /// Store canonical decoded event rows.
+    pub async fn store_canonical_events(&self, events: Vec<CanonicalEventModel>) -> Result<()> {
+        self.backend.store_canonical_events(events).await
+    }
+
+    /// Store balance insight flow rows.
+    pub async fn store_coin_flows(&self, flows: Vec<CoinFlowModel>) -> Result<()> {
+        self.backend.store_coin_flows(flows).await
+    }
+
+    /// Claim due repair queue entries.
+    pub async fn claim_repair_entries(&self, limit: usize) -> Result<Vec<RepairQueueEntry>> {
+        self.backend.claim_repair_entries(limit).await
+    }
+
+    /// Enqueue a checkpoint for background repair.
+    pub async fn enqueue_repair(&self, checkpoint: u64, error: &str) -> Result<()> {
+        self.backend.enqueue_repair(checkpoint, error).await
+    }
+
+    /// Mark a repair attempt complete or rescheduled.
+    pub async fn complete_repair(
+        &self,
+        checkpoint: u64,
+        success: bool,
+        error: Option<&str>,
+        max_attempts: i32,
+        backoff_secs: u64,
+    ) -> Result<()> {
+        self.backend
+            .complete_repair(checkpoint, success, error, max_attempts, backoff_secs)
+            .await
+    }
+
+    /// Read the converged indexer progress row.
+    pub async fn get_progress(&self, pipeline: &str) -> Result<Option<IndexerProgressModel>> {
+        self.backend.get_progress(pipeline).await
+    }
+
+    /// Advance the continuous checkpoint.
+    pub async fn advance_continuous(
+        &self,
+        pipeline: &str,
+        continuous: u64,
+        floor: u64,
+        digest: Option<&str>,
+    ) -> Result<()> {
+        self.backend
+            .advance_continuous(pipeline, continuous, floor, digest)
+            .await
+    }
+
+    /// Record the archive interval and hot boundary.
+    pub async fn record_archive_window(
+        &self,
+        pipeline: &str,
+        archive_lo: Option<u64>,
+        archive_hi: Option<u64>,
+        hot_boundary: Option<u64>,
+    ) -> Result<()> {
+        self.backend
+            .record_archive_window(pipeline, archive_lo, archive_hi, hot_boundary)
+            .await
+    }
+
+    /// Detect missing checkpoint sequences in [floor, tip].
+    pub async fn detect_gaps(&self, floor: u64, tip: u64) -> Result<Vec<(u64, u64)>> {
+        self.backend.detect_gaps(floor, tip).await
+    }
+
+    /// Fetch stored checkpoint digests in a range.
+    pub async fn checkpoint_digests(&self, start: u64, end: u64) -> Result<Vec<(u64, String)>> {
+        self.backend.checkpoint_digests(start, end).await
+    }
+
+    /// Row counts per canonical table.
+    pub async fn table_counts(&self) -> Result<TableCounts> {
+        self.backend.table_counts().await
+    }
+
     /// Read a pipeline watermark.
     pub async fn get_watermark(&self, pipeline: &str) -> Result<Option<WatermarkModel>> {
         self.backend.get_watermark(pipeline).await
@@ -246,6 +410,21 @@ impl StorageManager {
         self.backend.query_transactions(filter).await
     }
 
+    /// Execute a validated read-only SQL statement with caps.
+    pub async fn sql_query(
+        &self,
+        sql: &str,
+        limit: u64,
+        max_bytes: usize,
+    ) -> Result<GatewayResult> {
+        self.backend.sql_query(sql, limit, max_bytes).await
+    }
+
+    /// Refresh derived balance insights.
+    pub async fn repair_derived_insights(&self) -> Result<()> {
+        self.backend.repair_derived_insights().await
+    }
+
     /// Health check
     pub async fn health_check(&self) -> Result<bool> {
         self.backend.health_check().await
@@ -254,9 +433,23 @@ impl StorageManager {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn test_storage_manager_creation() {
         // This is a placeholder test - actual tests would require database setup
         // Test passes by default - replace with actual test logic when database is available
+    }
+
+    #[test]
+    fn test_gateway_result_shape() {
+        let result = GatewayResult {
+            columns: vec!["sequence_number".to_string()],
+            rows: vec![serde_json::json!({"sequence_number": 1})],
+            row_count: 1,
+            truncated: false,
+        };
+        assert_eq!(result.row_count, 1);
+        assert_eq!(result.columns.len(), 1);
     }
 }

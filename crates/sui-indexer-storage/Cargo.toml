@@ -37,5 +37,8 @@ uuid.workspace = true
 # Tracing
 tracing.workspace = true
 
+# Hex encoding for BYTEA gateway output
+hex.workspace = true
+
 [lints]
 workspace = true

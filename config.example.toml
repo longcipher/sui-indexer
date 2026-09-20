@@ -28,6 +28,8 @@ auto_migrate = true
 start_checkpoint = 0
 batch_size = 100
 max_concurrent_batches = 10
+poll_interval_secs = 10
+ingestion_mode = "stream"
 index_transactions = true
 index_objects = true
 
@@ -40,3 +42,35 @@ event_type = "Transfer"
 [[events.filters]]
 package = "0x2"
 module = "coin"
+
+[sync]
+tip_interval_secs = 2
+tracker_batch_size = 50
+backfill_enabled = true
+backfill_batch_size = 200
+backfill_concurrency = 8
+lag_yield_threshold = 10
+max_range_span = 200
+failure_backoff_threshold = 5
+
+[repair]
+enabled = true
+poll_interval_secs = 30
+batch_size = 20
+max_attempts = 10
+backoff_base_secs = 30
+backoff_max_secs = 3600
+
+[archive]
+enabled = false
+directory = "./archive"
+segment_size = 10000
+
+[query]
+max_rows = 1000
+timeout_ms = 5000
+max_bytes = 10485760
+
+[api]
+enabled = false
+listen = "127.0.0.1:8080"

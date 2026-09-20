@@ -7,7 +7,8 @@ use sui_indexer_events::{ProcessedEvent, ProcessedTransaction};
 use tracing::{error, info};
 
 use crate::{
-    CheckpointModel, EventQueryFilter, ObjectModel, Storage, TransactionModel,
+    CanonicalEventModel, CheckpointModel, CoinFlowModel, EventQueryFilter, GatewayResult,
+    IndexerProgressModel, ObjectModel, RepairQueueEntry, Storage, TableCounts, TransactionModel,
     TransactionQueryFilter, WatermarkModel,
 };
 
@@ -22,7 +23,16 @@ pub struct PostgresStorage {
 impl PostgresStorage {
     /// Create a new PostgreSQL storage backend
     pub async fn new(config: DatabaseConfig) -> Result<Self> {
-        let pool = PgPool::connect(&config.url).await?;
+        let options = config.url.parse::<sqlx::postgres::PgConnectOptions>()?;
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(config.max_connections)
+            .min_connections(config.min_connections)
+            .acquire_timeout(std::time::Duration::from_secs(
+                config.connect_timeout.max(1),
+            ))
+            .idle_timeout(config.idle_timeout.map(std::time::Duration::from_secs))
+            .connect_with(options)
+            .await?;
 
         Ok(Self { pool })
     }
@@ -239,7 +249,8 @@ impl Storage for PostgresStorage {
 
         let mut query_builder = sqlx::QueryBuilder::new(
             "INSERT INTO transactions (
-                id, digest, checkpoint_sequence, timestamp, gas_used, success
+                id, digest, checkpoint_sequence, timestamp, sender,
+                gas_used, gas_price, success, error_message, effects
             ) ",
         );
         query_builder.push_values(transactions, |mut b, transaction| {
@@ -247,10 +258,22 @@ impl Storage for PostgresStorage {
                 .push_bind(transaction.digest)
                 .push_bind(transaction.checkpoint_sequence)
                 .push_bind(transaction.created_at)
+                .push_bind(transaction.sender)
                 .push_bind(transaction.gas_used)
-                .push_bind(transaction.success);
+                .push_bind(transaction.gas_price)
+                .push_bind(transaction.success)
+                .push_bind(transaction.error_message)
+                .push_bind(serde_json::Value::Null);
         });
-        query_builder.push(" ON CONFLICT (digest) DO NOTHING");
+        query_builder.push(
+            " ON CONFLICT (digest) DO UPDATE SET
+                checkpoint_sequence = EXCLUDED.checkpoint_sequence,
+                sender = EXCLUDED.sender,
+                gas_used = EXCLUDED.gas_used,
+                gas_price = EXCLUDED.gas_price,
+                success = EXCLUDED.success,
+                error_message = EXCLUDED.error_message",
+        );
 
         query_builder.build().execute(&self.pool).await?;
         Ok(())
@@ -285,24 +308,32 @@ impl Storage for PostgresStorage {
     async fn store_checkpoint_model(&self, checkpoint: CheckpointModel) -> Result<()> {
         sqlx::query(
             "INSERT INTO checkpoints (
-                sequence_number, digest, epoch, timestamp_ms,
-                transaction_count, network_total_transactions
+                sequence_number, digest, prev_digest, epoch, timestamp_ms,
+                transaction_count, network_total_transactions,
+                validator_signature, end_of_epoch_data, updated_at
              )
-             VALUES ($1, $2, $3, $4, $5, $6)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
              ON CONFLICT (sequence_number)
              DO UPDATE SET
                 digest = EXCLUDED.digest,
+                prev_digest = EXCLUDED.prev_digest,
                 epoch = EXCLUDED.epoch,
                 timestamp_ms = EXCLUDED.timestamp_ms,
                 transaction_count = EXCLUDED.transaction_count,
-                network_total_transactions = EXCLUDED.network_total_transactions",
+                network_total_transactions = EXCLUDED.network_total_transactions,
+                validator_signature = EXCLUDED.validator_signature,
+                end_of_epoch_data = EXCLUDED.end_of_epoch_data,
+                updated_at = NOW()",
         )
         .bind(checkpoint.sequence_number)
         .bind(checkpoint.digest)
+        .bind(checkpoint.prev_digest)
         .bind(checkpoint.epoch)
         .bind(checkpoint.timestamp_ms)
         .bind(checkpoint.transaction_count)
         .bind(checkpoint.network_total_transactions)
+        .bind(checkpoint.validator_signature)
+        .bind(checkpoint.end_of_epoch_data)
         .execute(&self.pool)
         .await?;
 
@@ -508,6 +539,91 @@ impl Storage for PostgresStorage {
             .collect()
     }
 
+    async fn sql_query(&self, sql: &str, limit: u64, max_bytes: usize) -> Result<GatewayResult> {
+        use sqlx::Column;
+        // Gateway SQL is validated SELECT-only upstream (allowlist tables, no
+        // multi-statements); assert safety explicitly for sqlx 0.9.
+        let owned = sqlx::AssertSqlSafe(sql.to_string());
+        let rows = sqlx::query(owned)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| sanitize_sql_error(&e))?;
+        let mut result = GatewayResult {
+            columns: Vec::new(),
+            rows: Vec::with_capacity(rows.len().min(limit.max(1) as usize)),
+            row_count: 0,
+            truncated: false,
+        };
+        let mut bytes = 0_usize;
+        for (index, row) in rows.iter().enumerate() {
+            if index == 0 {
+                result.columns = row
+                    .columns()
+                    .iter()
+                    .map(|column| column.name().to_string())
+                    .collect();
+            }
+            if index as u64 >= limit.max(1) {
+                result.truncated = true;
+                break;
+            }
+            let mut object = serde_json::Map::new();
+            for column in row.columns() {
+                let type_name = column.type_info().to_string();
+                let value: serde_json::Value = if type_name.contains("INT8")
+                    || type_name.contains("INT4")
+                    || type_name.contains("INT2")
+                {
+                    row.try_get::<i64, _>(column.name())
+                        .or_else(|_| row.try_get::<i32, _>(column.name()).map(i64::from))
+                        .map(|v| serde_json::json!(v))
+                        .unwrap_or(serde_json::Value::Null)
+                } else if type_name.contains("BOOL") {
+                    row.try_get::<bool, _>(column.name())
+                        .map(|v| serde_json::json!(v))
+                        .unwrap_or(serde_json::Value::Null)
+                } else if type_name.contains("NUMERIC") {
+                    row.try_get::<String, _>(column.name())
+                        .map(|v| serde_json::json!(v))
+                        .unwrap_or(serde_json::Value::Null)
+                } else if type_name.contains("JSON") {
+                    row.try_get::<serde_json::Value, _>(column.name())
+                        .unwrap_or(serde_json::Value::Null)
+                } else if type_name.contains("BYTEA") {
+                    row.try_get::<Vec<u8>, _>(column.name())
+                        .map(|v| serde_json::json!(hex::encode(v)))
+                        .unwrap_or(serde_json::Value::Null)
+                } else if type_name.contains("TIMESTAMPTZ") || type_name.contains("TIMESTAMP") {
+                    row.try_get::<chrono::DateTime<chrono::Utc>, _>(column.name())
+                        .map(|v| serde_json::json!(v))
+                        .unwrap_or(serde_json::Value::Null)
+                } else if type_name.contains("UUID") {
+                    row.try_get::<uuid::Uuid, _>(column.name())
+                        .map(|v| serde_json::json!(v))
+                        .unwrap_or(serde_json::Value::Null)
+                } else {
+                    row.try_get::<String, _>(column.name())
+                        .map(|v| serde_json::json!(v))
+                        .unwrap_or(serde_json::Value::Null)
+                };
+                object.insert(column.name().to_string(), value);
+            }
+            let line = serde_json::Value::Object(object);
+            bytes += line.to_string().len();
+            if bytes > max_bytes.max(1024) {
+                result.truncated = true;
+                break;
+            }
+            result.rows.push(line);
+        }
+        result.row_count = result.rows.len();
+        Ok(result)
+    }
+
+    async fn repair_derived_insights(&self) -> Result<()> {
+        self.refresh_coin_insights().await
+    }
+
     async fn health_check(&self) -> Result<bool> {
         match sqlx::query("SELECT 1").execute(&self.pool).await {
             Ok(_) => Ok(true),
@@ -516,6 +632,334 @@ impl Storage for PostgresStorage {
                 Ok(false)
             }
         }
+    }
+
+    async fn store_canonical_events(&self, events: Vec<CanonicalEventModel>) -> Result<()> {
+        if events.is_empty() {
+            return Ok(());
+        }
+
+        let mut query_builder = sqlx::QueryBuilder::new(
+            "INSERT INTO events_v2 (
+                id, checkpoint_sequence, transaction_digest, event_index,
+                package_id, module_name, event_type, sender, timestamp_ms,
+                bcs, fields
+            ) ",
+        );
+        query_builder.push_values(events, |mut b, event| {
+            b.push_bind(event.id)
+                .push_bind(event.checkpoint_sequence)
+                .push_bind(event.transaction_digest)
+                .push_bind(event.event_index)
+                .push_bind(event.package_id)
+                .push_bind(event.module_name)
+                .push_bind(event.event_type)
+                .push_bind(event.sender)
+                .push_bind(event.timestamp_ms)
+                .push_bind(event.bcs)
+                .push_bind(event.fields);
+        });
+        query_builder.push(" ON CONFLICT (transaction_digest, event_index) DO NOTHING");
+
+        query_builder.build().execute(&self.pool).await?;
+        Ok(())
+    }
+
+    async fn store_coin_flows(&self, flows: Vec<CoinFlowModel>) -> Result<()> {
+        if flows.is_empty() {
+            return Ok(());
+        }
+
+        let mut query_builder = sqlx::QueryBuilder::new(
+            "INSERT INTO coin_flows (
+                checkpoint_sequence, timestamp_ms, transaction_digest,
+                coin_type, holder, object_id, version, balance
+            ) ",
+        );
+        query_builder.push_values(flows, |mut b, flow| {
+            b.push_bind(flow.checkpoint_sequence)
+                .push_bind(flow.timestamp_ms)
+                .push_bind(flow.transaction_digest)
+                .push_bind(flow.coin_type)
+                .push_bind(flow.holder)
+                .push_bind(flow.object_id)
+                .push_bind(flow.version)
+                .push_bind(balance_to_numeric(&flow.balance));
+        });
+        query_builder.push(
+            " ON CONFLICT (object_id, version) DO UPDATE SET
+                balance = EXCLUDED.balance,
+                checkpoint_sequence = EXCLUDED.checkpoint_sequence",
+        );
+
+        query_builder.build().execute(&self.pool).await?;
+        self.refresh_coin_insights().await?;
+        Ok(())
+    }
+
+    async fn claim_repair_entries(&self, limit: usize) -> Result<Vec<RepairQueueEntry>> {
+        let entries = sqlx::query_as::<_, RepairQueueEntry>(
+            "SELECT checkpoint_sequence, attempts, next_retry_at, last_error,
+                    parked, created_at, updated_at
+             FROM repair_queue
+             WHERE parked = FALSE AND next_retry_at <= NOW()
+             ORDER BY checkpoint_sequence
+             LIMIT $1
+             FOR UPDATE SKIP LOCKED",
+        )
+        .bind(limit.max(1) as i64)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(entries)
+    }
+
+    async fn enqueue_repair(&self, checkpoint: u64, error: &str) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO repair_queue (checkpoint_sequence, last_error, updated_at)
+             VALUES ($1, $2, NOW())
+             ON CONFLICT (checkpoint_sequence)
+             DO UPDATE SET last_error = EXCLUDED.last_error, updated_at = NOW()",
+        )
+        .bind(checkpoint as i64)
+        .bind(error)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn complete_repair(
+        &self,
+        checkpoint: u64,
+        success: bool,
+        error: Option<&str>,
+        max_attempts: i32,
+        backoff_secs: u64,
+    ) -> Result<()> {
+        if success {
+            sqlx::query("DELETE FROM repair_queue WHERE checkpoint_sequence = $1")
+                .bind(checkpoint as i64)
+                .execute(&self.pool)
+                .await?;
+            return Ok(());
+        }
+        sqlx::query(
+            "UPDATE repair_queue
+             SET attempts = attempts + 1,
+                 last_error = COALESCE($2, last_error),
+                 next_retry_at = NOW() + make_interval(secs => $3),
+                 parked = (attempts + 1) >= $4,
+                 updated_at = NOW()
+             WHERE checkpoint_sequence = $1",
+        )
+        .bind(checkpoint as i64)
+        .bind(error)
+        .bind(backoff_secs as f64)
+        .bind(max_attempts.max(1))
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn get_progress(&self, pipeline: &str) -> Result<Option<IndexerProgressModel>> {
+        let progress = sqlx::query_as::<_, IndexerProgressModel>(
+            "SELECT pipeline, continuous_checkpoint, floor_checkpoint, archive_lo,
+                    archive_hi, hot_boundary, hot_boundary_ts, digest, updated_at
+             FROM indexer_progress WHERE pipeline = $1",
+        )
+        .bind(pipeline)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(progress)
+    }
+
+    async fn advance_continuous(
+        &self,
+        pipeline: &str,
+        continuous: u64,
+        floor: u64,
+        digest: Option<&str>,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO indexer_progress (
+                pipeline, continuous_checkpoint, floor_checkpoint, digest, updated_at
+             )
+             VALUES ($1, $2, $3, $4, NOW())
+             ON CONFLICT (pipeline)
+             DO UPDATE SET
+                continuous_checkpoint = GREATEST(indexer_progress.continuous_checkpoint, EXCLUDED.continuous_checkpoint),
+                floor_checkpoint = GREATEST(indexer_progress.floor_checkpoint, EXCLUDED.floor_checkpoint),
+                digest = COALESCE(EXCLUDED.digest, indexer_progress.digest),
+                updated_at = NOW()",
+        )
+        .bind(pipeline)
+        .bind(continuous as i64)
+        .bind(floor as i64)
+        .bind(digest)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn record_archive_window(
+        &self,
+        pipeline: &str,
+        archive_lo: Option<u64>,
+        archive_hi: Option<u64>,
+        hot_boundary: Option<u64>,
+    ) -> Result<()> {
+        let to_i64 = |value: Option<u64>| value.map(|v| v as i64);
+        sqlx::query(
+            "INSERT INTO indexer_progress (
+                pipeline, continuous_checkpoint, floor_checkpoint,
+                archive_lo, archive_hi, hot_boundary, updated_at
+             )
+             VALUES ($1, 0, 0, $2, $3, $4, NOW())
+             ON CONFLICT (pipeline)
+             DO UPDATE SET
+                archive_lo = COALESCE(EXCLUDED.archive_lo, indexer_progress.archive_lo),
+                archive_hi = CASE
+                    WHEN EXCLUDED.archive_hi IS NULL THEN indexer_progress.archive_hi
+                    ELSE GREATEST(COALESCE(indexer_progress.archive_hi, 0), EXCLUDED.archive_hi)
+                END,
+                hot_boundary = COALESCE(EXCLUDED.hot_boundary, indexer_progress.hot_boundary),
+                updated_at = NOW()",
+        )
+        .bind(pipeline)
+        .bind(to_i64(archive_lo))
+        .bind(to_i64(archive_hi))
+        .bind(to_i64(hot_boundary))
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn detect_gaps(&self, floor: u64, tip: u64) -> Result<Vec<(u64, u64)>> {
+        if floor > tip {
+            return Ok(Vec::new());
+        }
+        let rows = sqlx::query(
+            "WITH wanted AS (
+                SELECT generate_series($1, $2) AS seq
+             ),
+             missing AS (
+                SELECT seq FROM wanted
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM checkpoints WHERE sequence_number = seq
+                )
+             ),
+             grouped AS (
+                SELECT seq,
+                       seq - ROW_NUMBER() OVER (ORDER BY seq) AS grp
+                FROM missing
+             )
+             SELECT MIN(seq) AS gap_start, MAX(seq) AS gap_end
+             FROM grouped GROUP BY grp ORDER BY gap_start DESC",
+        )
+        .bind(floor as i64)
+        .bind(tip as i64)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .iter()
+            .map(|row| {
+                (
+                    row.get::<i64, _>("gap_start") as u64,
+                    row.get::<i64, _>("gap_end") as u64,
+                )
+            })
+            .collect())
+    }
+
+    async fn checkpoint_digests(&self, start: u64, end: u64) -> Result<Vec<(u64, String)>> {
+        let rows = sqlx::query(
+            "SELECT sequence_number, digest FROM checkpoints
+             WHERE sequence_number >= $1 AND sequence_number <= $2
+             ORDER BY sequence_number",
+        )
+        .bind(start as i64)
+        .bind(end as i64)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .iter()
+            .map(|row| {
+                (
+                    row.get::<i64, _>("sequence_number") as u64,
+                    row.get::<String, _>("digest"),
+                )
+            })
+            .collect())
+    }
+
+    async fn table_counts(&self) -> Result<TableCounts> {
+        let checkpoints: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM checkpoints")
+            .fetch_one(&self.pool)
+            .await?;
+        let transactions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM transactions")
+            .fetch_one(&self.pool)
+            .await?;
+        let events: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events_v2")
+            .fetch_one(&self.pool)
+            .await?;
+        let objects: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM objects")
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(TableCounts {
+            checkpoints: checkpoints.max(0) as u64,
+            transactions: transactions.max(0) as u64,
+            events: events.max(0) as u64,
+            objects: objects.max(0) as u64,
+        })
+    }
+}
+
+impl PostgresStorage {
+    /// Refresh balance snapshots and coin metadata from fresh flows.
+    async fn refresh_coin_insights(&self) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO balance_snapshots (holder, coin_type, balance, checkpoint_sequence, updated_at)
+             SELECT holder, coin_type, SUM(balance), MAX(checkpoint_sequence), NOW()
+             FROM coin_flows
+             GROUP BY holder, coin_type
+             ON CONFLICT (holder, coin_type)
+             DO UPDATE SET
+                balance = EXCLUDED.balance,
+                checkpoint_sequence = EXCLUDED.checkpoint_sequence,
+                updated_at = NOW()",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO coin_metadata (coin_type, first_seen_checkpoint, last_seen_checkpoint, flow_count, updated_at)
+             SELECT coin_type, MIN(checkpoint_sequence), MAX(checkpoint_sequence), COUNT(*), NOW()
+             FROM coin_flows
+             GROUP BY coin_type
+             ON CONFLICT (coin_type)
+             DO UPDATE SET
+                first_seen_checkpoint = LEAST(coin_metadata.first_seen_checkpoint, EXCLUDED.first_seen_checkpoint),
+                last_seen_checkpoint = GREATEST(coin_metadata.last_seen_checkpoint, EXCLUDED.last_seen_checkpoint),
+                flow_count = EXCLUDED.flow_count,
+                updated_at = NOW()",
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+}
+
+/// Convert a balance JSON value into a NUMERIC(78,0)-compatible string.
+fn balance_to_numeric(balance: &serde_json::Value) -> String {
+    match balance {
+        serde_json::Value::Number(number) => number.to_string(),
+        serde_json::Value::String(text) => {
+            let digits: String = text.chars().filter(|c| c.is_ascii_digit()).collect();
+            if digits.is_empty() {
+                "0".to_string()
+            } else {
+                digits
+            }
+        }
+        _ => "0".to_string(),
     }
 }
 
@@ -552,4 +996,16 @@ fn processed_transaction_from_row(row: sqlx::postgres::PgRow) -> Result<Processe
         events: Vec::new(),
         metadata: serde_json::from_value(row.get("metadata"))?,
     })
+}
+
+/// Redact connection details from database errors before surfacing them.
+fn sanitize_sql_error(error: &sqlx::Error) -> eyre::Error {
+    let mut message = error.to_string();
+    for secret in ["postgres://", "password=", "@localhost", "@127.0.0.1"] {
+        message = message.replace(secret, "[redacted]");
+    }
+    if message.len() > 500 {
+        message.truncate(500);
+    }
+    eyre::eyre!("query failed: {message}")
 }

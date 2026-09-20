@@ -44,5 +44,8 @@ tracing.workspace = true
 # Concurrent batch processing
 futures.workspace = true
 
+# Hex encoding for BCS payloads
+hex.workspace = true
+
 [lints]
 workspace = true

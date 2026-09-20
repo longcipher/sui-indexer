@@ -116,12 +116,12 @@ impl EventTransformer {
             );
         }
 
-        // Include raw BCS data if configured and available
+        // Include raw BCS bytes when configured and available.
         if self.include_raw_event {
-            // BcsEvent is likely a wrapper type, try to get the bytes
-            let bcs_string = format!("{:?}", event.bcs);
-            if !bcs_string.is_empty() && bcs_string != "Event([])" {
-                fields.insert("bcs_data".to_string(), Value::String(bcs_string));
+            let bytes = event.bcs.bytes();
+            if !bytes.is_empty() {
+                fields.insert("bcs_bytes".to_string(), Value::Number(bytes.len().into()));
+                fields.insert("bcs_hex".to_string(), Value::String(hex::encode(bytes)));
             }
         }
 

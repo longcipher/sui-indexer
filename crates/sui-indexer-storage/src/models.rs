@@ -65,10 +65,13 @@ pub struct WatermarkModel {
 pub struct CheckpointModel {
     pub sequence_number: i64,
     pub digest: String,
+    pub prev_digest: Option<String>,
     pub epoch: i64,
     pub timestamp_ms: i64,
     pub transaction_count: i64,
     pub network_total_transactions: i64,
+    pub validator_signature: String,
+    pub end_of_epoch_data: Option<serde_json::Value>,
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -83,6 +86,63 @@ pub struct ObjectModel {
     pub transaction_digest: String,
     pub sender: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Canonical decoded event row (BCS bytes stored as BYTEA).
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct CanonicalEventModel {
+    pub id: uuid::Uuid,
+    pub checkpoint_sequence: i64,
+    pub transaction_digest: String,
+    pub event_index: i64,
+    pub package_id: String,
+    pub module_name: String,
+    pub event_type: String,
+    pub sender: String,
+    pub timestamp_ms: i64,
+    pub bcs: Option<Vec<u8>>,
+    pub fields: serde_json::Value,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Converged indexer progress: continuous/floor watermarks plus archive
+/// interval and hot boundary.
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct IndexerProgressModel {
+    pub pipeline: String,
+    pub continuous_checkpoint: i64,
+    pub floor_checkpoint: i64,
+    pub archive_lo: Option<i64>,
+    pub archive_hi: Option<i64>,
+    pub hot_boundary: Option<i64>,
+    pub hot_boundary_ts: Option<chrono::DateTime<chrono::Utc>>,
+    pub digest: Option<String>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Durable repair queue entry for a checkpoint that failed ingest.
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct RepairQueueEntry {
+    pub checkpoint_sequence: i64,
+    pub attempts: i32,
+    pub next_retry_at: chrono::DateTime<chrono::Utc>,
+    pub last_error: Option<String>,
+    pub parked: bool,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Balance insight flow row derived from coin object changes.
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct CoinFlowModel {
+    pub checkpoint_sequence: i64,
+    pub timestamp_ms: i64,
+    pub transaction_digest: String,
+    pub coin_type: String,
+    pub holder: String,
+    pub object_id: String,
+    pub version: i64,
+    pub balance: serde_json::Value,
 }
 
 /// Processed events tracking to avoid reprocessing
@@ -262,10 +322,13 @@ pub struct WatermarkModelConfig {
 pub struct CheckpointModelConfig {
     pub sequence_number: i64,
     pub digest: String,
+    pub prev_digest: Option<String>,
     pub epoch: i64,
     pub timestamp_ms: i64,
     pub transaction_count: i64,
     pub network_total_transactions: i64,
+    pub validator_signature: String,
+    pub end_of_epoch_data: Option<serde_json::Value>,
 }
 
 /// Configuration for creating a new ObjectModel
@@ -302,11 +365,78 @@ impl CheckpointModel {
         Self {
             sequence_number: config.sequence_number,
             digest: config.digest,
+            prev_digest: config.prev_digest,
             epoch: config.epoch,
             timestamp_ms: config.timestamp_ms,
             transaction_count: config.transaction_count,
             network_total_transactions: config.network_total_transactions,
+            validator_signature: config.validator_signature,
+            end_of_epoch_data: config.end_of_epoch_data,
             created_at: chrono::Utc::now(),
+        }
+    }
+}
+
+/// Configuration for creating a canonical decoded event row.
+#[derive(Debug)]
+pub struct CanonicalEventModelConfig {
+    pub checkpoint_sequence: i64,
+    pub transaction_digest: String,
+    pub event_index: i64,
+    pub package_id: String,
+    pub module_name: String,
+    pub event_type: String,
+    pub sender: String,
+    pub timestamp_ms: i64,
+    pub bcs: Option<Vec<u8>>,
+    pub fields: serde_json::Value,
+}
+
+impl CanonicalEventModel {
+    /// Create a new canonical event row.
+    pub fn new(config: CanonicalEventModelConfig) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4(),
+            checkpoint_sequence: config.checkpoint_sequence,
+            transaction_digest: config.transaction_digest,
+            event_index: config.event_index,
+            package_id: config.package_id,
+            module_name: config.module_name,
+            event_type: config.event_type,
+            sender: config.sender,
+            timestamp_ms: config.timestamp_ms,
+            bcs: config.bcs,
+            fields: config.fields,
+            created_at: chrono::Utc::now(),
+        }
+    }
+}
+
+/// Configuration for creating a coin flow row.
+#[derive(Debug)]
+pub struct CoinFlowModelConfig {
+    pub checkpoint_sequence: i64,
+    pub timestamp_ms: i64,
+    pub transaction_digest: String,
+    pub coin_type: String,
+    pub holder: String,
+    pub object_id: String,
+    pub version: i64,
+    pub balance: serde_json::Value,
+}
+
+impl CoinFlowModel {
+    /// Create a new coin flow row.
+    pub fn new(config: CoinFlowModelConfig) -> Self {
+        Self {
+            checkpoint_sequence: config.checkpoint_sequence,
+            timestamp_ms: config.timestamp_ms,
+            transaction_digest: config.transaction_digest,
+            coin_type: config.coin_type,
+            holder: config.holder,
+            object_id: config.object_id,
+            version: config.version,
+            balance: config.balance,
         }
     }
 }

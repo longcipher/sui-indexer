@@ -25,6 +25,7 @@ sui-indexer-core = { path = "../../crates/sui-indexer-core" }
 clap.workspace = true
 clap_complete.workspace = true
 eyre.workspace = true
+reqwest.workspace = true
 serde_json.workspace = true
 sui-indexer-storage = { path = "../../crates/sui-indexer-storage" }
 sui-types.workspace = true
@@ -36,5 +37,6 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
-[lints]
-workspace = true
+[lints.clippy]
+print_stdout = "allow"
+print_stderr = "allow"
