@@ -4,6 +4,12 @@ use eyre::Result;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
+pub mod multichain;
+pub use multichain::{
+    ChainConfig, ClickHouseConfig, FeedConfig, JobFilter, JobSpec, JobState, JobTier, OutputConfig,
+    RuleHostConfig, RuntimeConfig, ScanConfig, WindowConfig,
+};
+
 /// Main configuration for the Sui Indexer
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct IndexerConfig {
@@ -24,11 +30,29 @@ pub struct IndexerConfig {
     /// HTTP query API configuration
     pub api: ApiConfig,
     /// Webhook sinks for event push
+    #[serde(default)]
     pub sinks: Vec<WebhookSink>,
     /// Threshold alert rules
+    #[serde(default)]
     pub alerts: Vec<AlertRule>,
     /// Protocol presets for tagging
+    #[serde(default)]
     pub protocols: Vec<ProtocolPreset>,
+    /// Chain identity (one process serves one chain).
+    #[serde(default)]
+    pub chain: ChainConfig,
+    /// User-defined indexing jobs (a job is data, not a process).
+    #[serde(default)]
+    pub jobs: Vec<JobSpec>,
+    /// Columnar archive tier.
+    #[serde(default)]
+    pub clickhouse: ClickHouseConfig,
+    /// WASM rule-host quotas.
+    #[serde(default)]
+    pub rule_host: RuleHostConfig,
+    /// External data sources with window/cursor semantics.
+    #[serde(default)]
+    pub feeds: Vec<FeedConfig>,
 }
 
 /// Network configuration for Sui blockchain connection
@@ -77,6 +101,7 @@ pub struct EventsConfig {
     /// Ingestion mode: `stream` (subscription + backfill) or `poll`
     pub ingestion_mode: IngestionMode,
     /// Event filters to apply
+    #[serde(default)]
     pub filters: Vec<EventFilter>,
     /// Whether to index transaction effects
     pub index_transactions: bool,
@@ -151,6 +176,7 @@ pub struct WebhookSink {
     /// Target URL.
     pub url: String,
     /// Optional package allowlist (empty means all packages).
+    #[serde(default)]
     pub packages: Vec<String>,
     /// Optional bearer token sent as Authorization header.
     pub bearer_token: Option<String>,
@@ -173,8 +199,10 @@ pub struct ProtocolPreset {
     /// Protocol name (e.g. `navi`, `cetus`, `deepbook`).
     pub name: String,
     /// Package IDs belonging to the protocol.
+    #[serde(default)]
     pub packages: Vec<String>,
     /// Tags attached to matched events.
+    #[serde(default)]
     pub tags: Vec<String>,
 }
 
@@ -489,6 +517,50 @@ mod tests {
         assert!(!config.archive.enabled);
         assert_eq!(config.query.max_rows, 1000);
         assert_eq!(config.query.timeout_ms, 5000);
+    }
+
+    #[test]
+    fn test_example_file_parses_with_jobs() {
+        let config = ConfigLoader::from_file("../../config.example.toml")
+            .expect("config.example.toml parses");
+        assert_eq!(config.chain.kind, "move");
+        assert_eq!(config.chain.chain_id, "sui-testnet");
+        assert!(!config.clickhouse.enabled);
+        assert_eq!(config.rule_host.abi_versions, vec![1]);
+        assert_eq!(config.jobs.len(), 1);
+        assert!(config.jobs[0].validate().is_ok());
+    }
+
+    #[test]
+    fn test_load_with_sources_prefers_file_over_defaults() -> Result<()> {
+        let dir = tempfile::TempDir::new()?;
+        let path = dir.path().join("test.toml");
+        std::fs::write(
+            &path,
+            r#"
+[chain]
+kind = "svm"
+chain_id = "test-chain-xyz"
+"#,
+        )?;
+        let config = ConfigLoader::load_with_sources(Some(&path))?;
+        assert_eq!(config.chain.chain_id, "test-chain-xyz");
+        assert_eq!(config.chain.kind, "svm");
+        Ok(())
+    }
+
+    #[test]
+    fn test_from_env_fails_without_configuration() {
+        // Scrub the process environment so the loader sees an empty source.
+        // No other test reads the environment, so this is race-free here.
+        let scrubbed: Vec<String> = std::env::vars()
+            .map(|(key, _)| key)
+            .filter(|key| key.starts_with("SUI_INDEXER"))
+            .collect();
+        for key in &scrubbed {
+            unsafe { std::env::remove_var(key) };
+        }
+        assert!(ConfigLoader::from_env().is_err());
     }
 
     #[test]

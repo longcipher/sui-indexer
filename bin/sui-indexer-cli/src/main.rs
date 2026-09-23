@@ -133,6 +133,59 @@ enum Commands {
     },
     /// Self-update the binary from GitHub releases
     SelfUpdate,
+    /// Manage indexing jobs (apply, plan, list, rescan, retire)
+    Job {
+        /// Subcommand: apply, plan, ls, rescan, retire
+        #[command(subcommand)]
+        command: JobCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum JobCommands {
+    /// Create or bump a job from a TOML spec file
+    Apply {
+        /// Path to the job spec file (TOML `[[jobs]]` entry shape)
+        #[arg(short, long)]
+        file: String,
+        /// Indexer API base URL
+        #[arg(long, default_value = "http://127.0.0.1:8080")]
+        api: String,
+    },
+    /// Dry run: print DDL plus estimated scan size, no writes
+    Plan {
+        /// Path to the job spec file
+        #[arg(short, long)]
+        file: String,
+        /// Tip used to bound `to = "head"` scans
+        #[arg(long)]
+        tip: Option<u64>,
+    },
+    /// List jobs with versions, status, cursor, rows and lag
+    Ls {
+        /// Indexer API base URL
+        #[arg(long, default_value = "http://127.0.0.1:8080")]
+        api: String,
+    },
+    /// Trigger an explicit re-scan from a height (default 0)
+    Rescan {
+        /// Job name
+        name: String,
+        /// First height (inclusive)
+        #[arg(long, default_value_t = 0)]
+        from: u64,
+        /// Indexer API base URL
+        #[arg(long, default_value = "http://127.0.0.1:8080")]
+        api: String,
+    },
+    /// Retire a job's active version
+    Retire {
+        /// Job name
+        name: String,
+        /// Indexer API base URL
+        #[arg(long, default_value = "http://127.0.0.1:8080")]
+        api: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -211,9 +264,15 @@ async fn main() -> Result<()> {
                 let api_config = config.clone();
                 let api_storage = indexer.storage().clone();
                 let api_feed = indexer.block_feed().clone();
+                let api_jobs = indexer.job_metrics().clone();
                 tokio::spawn(async move {
-                    if let Err(e) =
-                        sui_indexer_core::api::serve(&api_config, &api_storage, &api_feed).await
+                    if let Err(e) = sui_indexer_core::api::serve(
+                        &api_config,
+                        &api_storage,
+                        &api_feed,
+                        &api_jobs,
+                    )
+                    .await
                     {
                         error!("Query API exited: {e}");
                     }
@@ -223,8 +282,9 @@ async fn main() -> Result<()> {
             if config.repair.enabled {
                 let repair_config = config.repair.clone();
                 let repair_storage = indexer.storage().clone();
+                let repair_indexer = indexer.clone();
                 tokio::spawn(async move {
-                    run_repair_loop(&repair_config, &repair_storage).await;
+                    run_repair_loop(&repair_config, &repair_storage, repair_indexer).await;
                 });
             }
 
@@ -277,17 +337,25 @@ async fn main() -> Result<()> {
             let bound = limit.max(1);
             let worker = sui_indexer_core::repair::RepairWorker::new(config.repair.clone());
             let storage = indexer.storage().clone();
-            let repaired = worker
-                .tick(&storage, async |sequence| {
-                    let mut backfill = IndexerCore::new(config.clone()).await?;
-                    backfill
-                        .process_checkpoint_range(sequence, sequence)
-                        .await?;
-                    Ok(true)
-                })
-                .await
-                .map(|repaired| repaired.min(bound))?;
-            info!("Repair pass completed: {repaired} checkpoints");
+            // One shared indexer for the whole pass: a fresh client and pool
+            // per entry would exhaust connections on large queues.
+            let shared = std::sync::Arc::new(tokio::sync::Mutex::new(indexer));
+            let mut repaired_total = 0usize;
+            while repaired_total < bound {
+                let shared = std::sync::Arc::clone(&shared);
+                let repaired = worker
+                    .tick(&storage, async move |sequence| {
+                        let mut guard = shared.lock().await;
+                        guard.process_checkpoint_range(sequence, sequence).await?;
+                        Ok(true)
+                    })
+                    .await?;
+                if repaired == 0 {
+                    break;
+                }
+                repaired_total += repaired;
+            }
+            info!("Repair pass completed: {repaired_total} checkpoints");
         }
         Commands::Archive { from, to } => {
             let config = ConfigLoader::from_file(&cli.config)?;
@@ -300,6 +368,9 @@ async fn main() -> Result<()> {
         }
         Commands::SelfUpdate => {
             run_self_update().await?;
+        }
+        Commands::Job { command } => {
+            run_job(command).await?;
         }
         Commands::Backfill { from, to } => {
             if from > to {
@@ -344,11 +415,9 @@ async fn main() -> Result<()> {
             let indexer = IndexerCore::new(config).await?;
             indexer.initialize().await?;
             indexer.storage().rewind_watermark(&pipeline, to).await?;
-            indexer
-                .storage()
-                .advance_continuous(&pipeline, to, to.saturating_sub(1), None)
-                .await
-                .unwrap_or(());
+            // Unconditional set: `advance_continuous` never regresses, so a
+            // rewind must go through the dedicated path.
+            indexer.storage().rewind_continuous(&pipeline, to).await?;
             info!("Rewound pipeline {pipeline} to checkpoint {to}");
         }
         Commands::Export {
@@ -382,7 +451,13 @@ async fn main() -> Result<()> {
             let config = ConfigLoader::from_file(&cli.config)?;
             let indexer = IndexerCore::new(config.clone()).await?;
             indexer.initialize().await?;
-            sui_indexer_core::api::serve(&config, indexer.storage(), indexer.block_feed()).await?;
+            sui_indexer_core::api::serve(
+                &config,
+                indexer.storage(),
+                indexer.block_feed(),
+                indexer.job_metrics(),
+            )
+            .await?;
         }
         Commands::Completion { shell } => {
             use clap::CommandFactory;
@@ -593,18 +668,108 @@ async fn run_insight(config_path: &str, command: InsightCommands) -> Result<()> 
 async fn run_repair_loop(
     config: &sui_indexer_config::RepairConfig,
     storage: &sui_indexer_storage::StorageManager,
+    indexer: IndexerCore,
 ) {
+    use std::sync::Arc;
     let worker = sui_indexer_core::repair::RepairWorker::new(config.clone());
+    let indexer = Arc::new(tokio::sync::Mutex::new(indexer));
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(
         config.poll_interval_secs.max(1),
     ));
     loop {
         interval.tick().await;
-        let result = worker.tick(storage, async |_| Ok(false)).await;
+        let indexer = Arc::clone(&indexer);
+        // Real reprocessing: success heals the checkpoint, failure applies
+        // backoff and eventually parks it. Never report false progress.
+        let result = worker
+            .tick(storage, async move |sequence| {
+                let mut guard = indexer.lock().await;
+                match guard.process_checkpoint_range(sequence, sequence).await {
+                    Ok(_) => Ok(true),
+                    Err(e) => Err(e),
+                }
+            })
+            .await;
         if let Err(e) = result {
             error!("Repair loop tick failed: {e}");
         }
     }
+}
+
+async fn run_job(command: JobCommands) -> Result<()> {
+    match command {
+        JobCommands::Apply { file, api } => {
+            let content = std::fs::read_to_string(&file)?;
+            let spec: sui_indexer_config::JobSpec = toml::from_str(&content)?;
+            spec.validate()
+                .map_err(|reason| eyre::eyre!("invalid job {}: {reason}", spec.name))?;
+            let client = reqwest::Client::new();
+            let response: serde_json::Value = client
+                .post(format!("{api}/jobs"))
+                .header("x-indexer-admin", "1")
+                .json(&serde_json::json!({ "spec": spec }))
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            info!("Job applied: {response}");
+        }
+        JobCommands::Plan { file, tip } => {
+            let content = std::fs::read_to_string(&file)?;
+            let spec: sui_indexer_config::JobSpec = toml::from_str(&content)?;
+            // Local dry run: tip flag bounds `head` scans (default: scan.from).
+            let tip = tip.unwrap_or(spec.scan.from);
+            let decision = job_engine::decide_apply(&spec, None).map_err(|e| eyre::eyre!("{e}"))?;
+            let plan =
+                job_engine::plan_job(&spec, decision, tip).map_err(|e| eyre::eyre!("{e}"))?;
+            info!("Job plan for {} v{}:", plan.name, plan.version);
+            for statement in &plan.ddl {
+                info!("  {statement}");
+            }
+            match plan.estimated_heights {
+                Some(heights) => info!("  estimated heights: {heights}"),
+                None => info!("  estimated heights: unbounded"),
+            }
+        }
+        JobCommands::Ls { api } => {
+            let client = reqwest::Client::new();
+            let jobs: serde_json::Value = client
+                .get(format!("{api}/jobs"))
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            info!("Jobs: {jobs}");
+        }
+        JobCommands::Rescan { name, from, api } => {
+            let client = reqwest::Client::new();
+            let response: serde_json::Value = client
+                .post(format!("{api}/jobs/{name}/rescan"))
+                .header("x-indexer-admin", "1")
+                .json(&serde_json::json!({ "from": from }))
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            info!("Rescan triggered: {response}");
+        }
+        JobCommands::Retire { name, api } => {
+            let client = reqwest::Client::new();
+            let response: serde_json::Value = client
+                .post(format!("{api}/jobs/{name}/retire"))
+                .header("x-indexer-admin", "1")
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            info!("Retired: {response}");
+        }
+    }
+    Ok(())
 }
 
 async fn run_self_update() -> Result<()> {
@@ -632,28 +797,41 @@ async fn run_doctor(config_path: &str) -> Result<()> {
     info!("Config loaded from {config_path}");
 
     let mut indexer = IndexerCore::new(config.clone()).await?;
-    let healthy = indexer.health_check().await?;
+    let mut healthy = indexer.health_check().await?;
     info!("gRPC + database health: {healthy}");
 
     for filter in &config.events.filters {
         if let Some(package) = &filter.package {
             match package.parse::<sui_types::base_types::ObjectID>() {
                 Ok(_) => info!("Filter package OK: {package}"),
-                Err(e) => error!("Filter package invalid {package}: {e}"),
+                Err(e) => {
+                    error!("Filter package invalid {package}: {e}");
+                    healthy = false;
+                }
             }
         }
-        if let Some(event_type) = &filter.event_type
-            && !event_type.contains("::")
-        {
-            error!("Filter event_type should be a fully qualified Move type: {event_type}");
+        // Bare Move names (`Transfer`) are valid filters alongside qualified
+        // paths; only values that are neither get flagged.
+        if let Some(event_type) = &filter.event_type {
+            let bare_ok = !event_type.is_empty()
+                && event_type
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_');
+            let qualified_ok = event_type.parse::<sui_types::TypeTag>().is_ok();
+            if !bare_ok && !qualified_ok {
+                error!("Filter event_type is neither a bare name nor a Move type: {event_type}");
+                healthy = false;
+            }
         }
     }
 
     if config.events.batch_size == 0 {
         error!("events.batch_size must be > 0");
+        healthy = false;
     }
     if config.events.max_concurrent_batches == 0 {
         error!("events.max_concurrent_batches must be > 0");
+        healthy = false;
     }
 
     if !healthy {
@@ -685,5 +863,163 @@ fn get_memory_usage() -> Result<String> {
     #[cfg(not(target_os = "macos"))]
     {
         Ok("Memory info unavailable on this platform".to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+
+    async fn mock_api() -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen_server = seen.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let url = format!("http://{}", listener.local_addr().expect("addr"));
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let seen_server = seen_server.clone();
+                tokio::spawn(async move {
+                    let mut reader = tokio::io::BufReader::new(&mut socket);
+                    let mut request_line = String::new();
+                    if reader.read_line(&mut request_line).await.is_err() {
+                        return;
+                    }
+                    let mut admin = String::new();
+                    let mut length = 0usize;
+                    loop {
+                        let mut line = String::new();
+                        if reader.read_line(&mut line).await.is_err() || line == "\r\n" {
+                            break;
+                        }
+                        let lower = line.to_ascii_lowercase();
+                        if let Some(value) = lower.strip_prefix("x-indexer-admin:") {
+                            admin = value.trim().to_owned();
+                        }
+                        if let Some(value) = lower.strip_prefix("content-length:") {
+                            length = value.trim().parse().unwrap_or(0);
+                        }
+                    }
+                    let mut body = vec![0u8; length];
+                    if length > 0 {
+                        let _ = reader.read_exact(&mut body).await;
+                    }
+                    seen_server.lock().expect("mutex").push(format!(
+                        "{admin} {} {} {}",
+                        request_line.split_whitespace().nth(0).unwrap_or(""),
+                        request_line.split_whitespace().nth(1).unwrap_or(""),
+                        String::from_utf8_lossy(&body),
+                    ));
+                    let reply =
+                        "HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}";
+                    let _ = reader.into_inner().write_all(reply.as_bytes()).await;
+                });
+            }
+        });
+        (url, seen)
+    }
+
+    fn spec_file(dir: &std::path::Path, name: &str) -> String {
+        let path = dir.join(format!("{name}.toml"));
+        std::fs::write(
+            &path,
+            r#"
+name = "cli-job"
+source = "events"
+tier = "sql"
+desired = "active"
+sql = "SELECT 1"
+[output]
+table = "job_cli_job"
+"#,
+        )
+        .expect("write");
+        path.to_string_lossy().into_owned()
+    }
+
+    #[tokio::test]
+    async fn job_commands_hit_the_api() {
+        let (api, seen) = mock_api().await;
+        let dir = std::env::temp_dir().join(format!("cli-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let file = spec_file(&dir, "job");
+
+        run_job(JobCommands::Apply {
+            file: file.clone(),
+            api: api.clone(),
+        })
+        .await
+        .expect("apply");
+        run_job(JobCommands::Ls { api: api.clone() })
+            .await
+            .expect("ls");
+        run_job(JobCommands::Rescan {
+            name: "cli-job".to_string(),
+            from: 0,
+            api: api.clone(),
+        })
+        .await
+        .expect("rescan");
+        run_job(JobCommands::Retire {
+            name: "cli-job".to_string(),
+            api: api.clone(),
+        })
+        .await
+        .expect("retire");
+
+        let seen = seen.lock().expect("mutex");
+        assert_eq!(seen.len(), 4);
+        // Mutations carry the admin header; reads do not need it.
+        assert!(seen[0].starts_with("1 POST /jobs "));
+        assert!(seen[0].contains("cli-job"));
+        assert!(seen[1].starts_with(" GET /jobs"));
+        assert!(seen[2].starts_with("1 POST /jobs/cli-job/rescan"));
+        assert!(seen[3].starts_with("1 POST /jobs/cli-job/retire"));
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[tokio::test]
+    async fn job_plan_is_local_and_rejects_bad_specs() {
+        let dir = std::env::temp_dir().join(format!("cli-plan-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let file = spec_file(&dir, "job");
+        run_job(JobCommands::Plan {
+            file,
+            tip: Some(100),
+        })
+        .await
+        .expect("plan");
+        let bad = dir.join("bad.toml");
+        std::fs::write(&bad, "name = \"\"\n").expect("write");
+        assert!(
+            run_job(JobCommands::Plan {
+                file: bad.to_string_lossy().into_owned(),
+                tip: None,
+            })
+            .await
+            .is_err()
+        );
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+}
+
+#[cfg(test)]
+mod memory_tests {
+    use super::*;
+
+    #[test]
+    fn memory_usage_reports_a_shape() {
+        let usage = get_memory_usage().expect("memory");
+        assert!(!usage.is_empty());
+        #[cfg(target_os = "macos")]
+        assert!(usage.ends_with("MB RSS"));
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(usage, "Memory info unavailable on this platform");
     }
 }

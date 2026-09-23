@@ -220,3 +220,71 @@ mod tests {
         assert!(tags.contains(&"coin".to_string()));
     }
 }
+
+#[cfg(test)]
+mod routing_tests {
+    use super::super::test_support::{navi_deposit_event, sample_event};
+    use super::*;
+
+    #[test]
+    fn presets_extend_the_defaults() {
+        let registry = ProtocolRegistry::from_presets(vec![ProtocolPreset {
+            name: "custom".to_string(),
+            packages: vec!["0xbeef".to_string()],
+            tags: vec!["t".to_string()],
+        }]);
+        let found = registry.lookup("0xbeef").expect("custom");
+        assert_eq!(found.name, "custom");
+        assert!(registry.lookup("0x2").is_some());
+    }
+
+    #[test]
+    fn action_tags_cover_all_lending_actions() {
+        let registry = ProtocolRegistry::with_defaults();
+        for (name, action) in [
+            ("DepositEvent", "deposit"),
+            ("WithdrawEvent", "withdraw"),
+            ("BorrowEvent", "borrow"),
+            ("RepayEvent", "repay"),
+        ] {
+            let event = sample_event(1, "0x2", "coin", name, serde_json::json!({}));
+            let tags = registry.tags_for_event(&event);
+            assert!(tags.contains(&action.to_string()), "{name}");
+            assert!(tags.contains(&"coin".to_string()));
+        }
+    }
+
+    #[test]
+    fn unknown_actions_carry_no_action_tag() {
+        let registry = ProtocolRegistry::with_defaults();
+        let event = sample_event(1, "0x2", "coin", "Mint", serde_json::json!({}));
+        let tags = registry.tags_for_event(&event);
+        assert!(!tags.contains(&"deposit".to_string()));
+        assert!(tags.contains(&"coin".to_string()));
+    }
+
+    #[test]
+    fn navi_deposit_carries_protocol_tags() {
+        let registry = ProtocolRegistry::with_defaults();
+        let tags = registry.tags_for_event(&navi_deposit_event());
+        assert!(tags.contains(&"navi".to_string()));
+        assert!(tags.contains(&"defi".to_string()));
+        assert!(tags.contains(&"deposit".to_string()));
+    }
+
+    #[tokio::test]
+    async fn router_dispatches_by_package() {
+        let mut router = ProtocolRouter::new();
+        router.register("0x2", Arc::new(LoggingProtocolHandler::new("coin-handler")));
+        let event = sample_event(1, "0x2", "coin", "Transfer", serde_json::json!({}));
+        assert!(router.dispatch(&event).await.expect("dispatch"));
+        let other = sample_event(1, "0x9", "m", "E", serde_json::json!({}));
+        assert!(!router.dispatch(&other).await.expect("dispatch"));
+    }
+
+    #[test]
+    fn handler_reports_its_name() {
+        let handler = LoggingProtocolHandler::new("coin-handler");
+        assert_eq!(handler.name(), "coin-handler");
+    }
+}

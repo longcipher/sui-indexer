@@ -1,0 +1,30 @@
+[package]
+name = "job-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+documentation.workspace = true
+authors.workspace = true
+description = "Multichain job engine: registry, reconciler, versioned outputs, SQL-tier scans"
+rust-version.workspace = true
+keywords = ["blockchain", "indexer", "jobs", "multichain"]
+categories = ["cryptography::blockchain", "database"]
+readme = "../../README.md"
+
+[dependencies]
+async-trait.workspace = true
+chain-core = { path = "../chain-core" }
+eyre.workspace = true
+sqlx.workspace = true
+sui-indexer-config = { path = "../sui-indexer-config" }
+sui-indexer-storage = { path = "../sui-indexer-storage" }
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+proptest = "1.9"
+
+[lints]
+workspace = true

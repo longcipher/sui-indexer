@@ -4,12 +4,16 @@ use eyre::Result;
 use sui_indexer_config::DatabaseConfig;
 use sui_indexer_events::{ProcessedEvent, ProcessedTransaction};
 
+pub mod control;
 pub mod migrations;
 pub mod models;
 pub mod postgres;
+pub mod skeleton;
 
+pub use control::*;
 pub use models::*;
 pub use postgres::PostgresStorage;
+pub use skeleton::{SkeletonCounts, prune_above, prune_sql, store_decoded_block};
 
 /// Filter bundle for event queries.
 #[derive(Debug, Clone, Default)]
@@ -187,6 +191,11 @@ pub trait Storage: Send + Sync {
     /// Rewind a pipeline watermark for replay.
     async fn rewind_watermark(&self, pipeline: &str, checkpoint: u64) -> Result<()>;
 
+    /// Rewind the converged progress row for replay. Unlike
+    /// [`Storage::advance_continuous`] (which never regresses), this sets the
+    /// continuous checkpoint unconditionally and lowers the floor to match.
+    async fn rewind_continuous(&self, pipeline: &str, checkpoint: u64) -> Result<()>;
+
     /// Query events with optional filters for the HTTP API.
     async fn query_events(&self, filter: EventQueryFilter<'_>) -> Result<Vec<ProcessedEvent>>;
 
@@ -210,15 +219,25 @@ pub trait Storage: Send + Sync {
 #[derive(Clone)]
 pub struct StorageManager {
     backend: Arc<dyn Storage>,
+    postgres: Arc<PostgresStorage>,
 }
 
 impl StorageManager {
     /// Create a new storage manager with PostgreSQL backend
     pub async fn new_postgres(config: DatabaseConfig) -> Result<Self> {
         let backend = PostgresStorage::new(config).await?;
+        let postgres = Arc::new(backend);
         Ok(Self {
-            backend: Arc::new(backend),
+            backend: postgres.clone(),
+            postgres,
         })
+    }
+
+    /// Shared PostgreSQL handle: sync and jobs share one pool, including
+    /// the job-engine control plane ([`JobControlPlane`]).
+    #[must_use]
+    pub fn postgres(&self) -> &Arc<PostgresStorage> {
+        &self.postgres
     }
 
     /// Initialize the storage backend
@@ -397,6 +416,11 @@ impl StorageManager {
         self.backend.rewind_watermark(pipeline, checkpoint).await
     }
 
+    /// Rewind the converged progress row for replay.
+    pub async fn rewind_continuous(&self, pipeline: &str, checkpoint: u64) -> Result<()> {
+        self.backend.rewind_continuous(pipeline, checkpoint).await
+    }
+
     /// Query events with optional filters for the HTTP API.
     pub async fn query_events(&self, filter: EventQueryFilter<'_>) -> Result<Vec<ProcessedEvent>> {
         self.backend.query_events(filter).await
@@ -451,5 +475,244 @@ mod tests {
         };
         assert_eq!(result.row_count, 1);
         assert_eq!(result.columns.len(), 1);
+    }
+
+    /// In-memory Storage recording progress writes: pins the default-method
+    /// delegations (`store_event` → `store_events`,
+    /// `update_last_processed_checkpoint` → `update_checkpoint_progress`,
+    /// `get_last_processed_checkpoint` → `get_latest_checkpoint`) without a DB.
+    struct FakeStorage {
+        progress: std::sync::Mutex<u64>,
+        events: std::sync::Mutex<u64>,
+    }
+
+    #[async_trait::async_trait]
+    impl Storage for FakeStorage {
+        async fn initialize(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn store_events(&self, events: Vec<ProcessedEvent>) -> Result<()> {
+            *self.events.lock().expect("mutex") += events.len() as u64;
+            Ok(())
+        }
+
+        async fn store_transactions(&self, _transactions: Vec<ProcessedTransaction>) -> Result<()> {
+            Ok(())
+        }
+
+        async fn get_events_by_checkpoint_range(
+            &self,
+            _start: u64,
+            _end: u64,
+        ) -> Result<Vec<ProcessedEvent>> {
+            Ok(Vec::new())
+        }
+
+        async fn get_latest_checkpoint(&self) -> Result<Option<u64>> {
+            Ok(Some(*self.progress.lock().expect("mutex")))
+        }
+
+        async fn update_checkpoint_progress(&self, checkpoint: u64) -> Result<()> {
+            *self.progress.lock().expect("mutex") = checkpoint;
+            Ok(())
+        }
+
+        async fn store_transaction_models(
+            &self,
+            _transactions: Vec<TransactionModel>,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn store_object_models(&self, _objects: Vec<ObjectModel>) -> Result<()> {
+            Ok(())
+        }
+
+        async fn store_checkpoint_model(&self, _checkpoint: CheckpointModel) -> Result<()> {
+            Ok(())
+        }
+
+        async fn store_canonical_events(&self, _events: Vec<CanonicalEventModel>) -> Result<()> {
+            Ok(())
+        }
+
+        async fn store_coin_flows(&self, _flows: Vec<CoinFlowModel>) -> Result<()> {
+            Ok(())
+        }
+
+        async fn claim_repair_entries(&self, _limit: usize) -> Result<Vec<RepairQueueEntry>> {
+            Ok(Vec::new())
+        }
+
+        async fn enqueue_repair(&self, _checkpoint: u64, _error: &str) -> Result<()> {
+            Ok(())
+        }
+
+        async fn complete_repair(
+            &self,
+            _checkpoint: u64,
+            _success: bool,
+            _error: Option<&str>,
+            _max_attempts: i32,
+            _backoff_secs: u64,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn get_progress(&self, _pipeline: &str) -> Result<Option<IndexerProgressModel>> {
+            Ok(None)
+        }
+
+        async fn advance_continuous(
+            &self,
+            _pipeline: &str,
+            _continuous: u64,
+            _floor: u64,
+            _digest: Option<&str>,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn record_archive_window(
+            &self,
+            _pipeline: &str,
+            _archive_lo: Option<u64>,
+            _archive_hi: Option<u64>,
+            _hot_boundary: Option<u64>,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn detect_gaps(&self, _floor: u64, _tip: u64) -> Result<Vec<(u64, u64)>> {
+            Ok(Vec::new())
+        }
+
+        async fn checkpoint_digests(&self, _start: u64, _end: u64) -> Result<Vec<(u64, String)>> {
+            Ok(Vec::new())
+        }
+
+        async fn table_counts(&self) -> Result<TableCounts> {
+            Ok(TableCounts::default())
+        }
+
+        async fn get_watermark(&self, _pipeline: &str) -> Result<Option<WatermarkModel>> {
+            Ok(None)
+        }
+
+        async fn set_watermark(&self, _watermark: WatermarkModel) -> Result<bool> {
+            Ok(true)
+        }
+
+        async fn prune_checkpoints(&self, _latest: u64, _retention: u64) -> Result<u64> {
+            Ok(0)
+        }
+
+        async fn rewind_watermark(&self, _pipeline: &str, _checkpoint: u64) -> Result<()> {
+            Ok(())
+        }
+
+        async fn rewind_continuous(&self, _pipeline: &str, _checkpoint: u64) -> Result<()> {
+            Ok(())
+        }
+
+        async fn query_events(&self, _filter: EventQueryFilter<'_>) -> Result<Vec<ProcessedEvent>> {
+            Ok(Vec::new())
+        }
+
+        async fn query_transactions(
+            &self,
+            _filter: TransactionQueryFilter<'_>,
+        ) -> Result<Vec<ProcessedTransaction>> {
+            Ok(Vec::new())
+        }
+
+        async fn sql_query(
+            &self,
+            _sql: &str,
+            _limit: u64,
+            _max_bytes: usize,
+        ) -> Result<GatewayResult> {
+            Ok(GatewayResult::default())
+        }
+
+        async fn repair_derived_insights(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn health_check(&self) -> Result<bool> {
+            Ok(true)
+        }
+    }
+
+    #[tokio::test]
+    async fn default_methods_delegate() {
+        let storage = FakeStorage {
+            progress: std::sync::Mutex::new(0),
+            events: std::sync::Mutex::new(0),
+        };
+        // `store_event` delegates to `store_events`.
+        storage
+            .store_event(&sample_processed_event())
+            .await
+            .expect("store");
+        assert_eq!(*storage.events.lock().expect("mutex"), 1);
+        // `update_last_processed_checkpoint` delegates to
+        // `update_checkpoint_progress`; the getter reads it back.
+        storage
+            .update_last_processed_checkpoint(7)
+            .await
+            .expect("update");
+        assert_eq!(
+            storage.get_last_processed_checkpoint().await.expect("get"),
+            7
+        );
+    }
+
+    fn sample_processed_event() -> ProcessedEvent {
+        ProcessedEvent {
+            id: uuid::Uuid::new_v4(),
+            event: sample_sui_event(),
+            transaction_digest: sui_types::base_types::TransactionDigest::new([1; 32]),
+            checkpoint_sequence: 1,
+            timestamp: chrono::Utc::now(),
+            package_id: "0x0000000000000000000000000000000000000000000000000000000000000002"
+                .parse()
+                .expect("package"),
+            module_name: "coin".to_owned(),
+            event_type: "Transfer".to_owned(),
+            sender: "0x1".to_owned(),
+            fields: serde_json::json!({}),
+            metadata: sui_indexer_events::EventMetadata {
+                processed_at: chrono::Utc::now(),
+                processing_duration_ms: 1,
+                event_index: 0,
+                matched_filters: vec![],
+                tags: vec![],
+            },
+        }
+    }
+
+    fn sample_sui_event() -> sui_json_rpc_types::SuiEvent {
+        sui_json_rpc_types::SuiEvent {
+            id: sui_types::event::EventID {
+                tx_digest: sui_types::base_types::TransactionDigest::new([1; 32]),
+                event_seq: 0,
+            },
+            package_id: "0x0000000000000000000000000000000000000000000000000000000000000002"
+                .parse()
+                .expect("package"),
+            transaction_module: "coin".parse().expect("module"),
+            sender: "0x0000000000000000000000000000000000000000000000000000000000000001"
+                .parse()
+                .expect("sender"),
+            type_:
+                "0x0000000000000000000000000000000000000000000000000000000000000002::coin::Transfer"
+                    .parse()
+                    .expect("type"),
+            parsed_json: serde_json::json!({}),
+            bcs: sui_json_rpc_types::BcsEvent::new(vec![]),
+            timestamp_ms: Some(0),
+        }
     }
 }

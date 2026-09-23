@@ -2,6 +2,12 @@
 resolver = "3"
 members = [
     "bin/sui-indexer-cli",
+    "crates/adapter-move",
+    "crates/adapter-svm",
+    "crates/archive-store",
+    "crates/chain-core",
+    "crates/job-engine",
+    "crates/rule-host",
     "crates/sui-indexer-config",
     "crates/sui-indexer-core",
     "crates/sui-indexer-events",
@@ -22,15 +28,8 @@ keywords = ["sui", "blockchain", "indexer", "web3", "postgres"]
 categories = ["cryptography::blockchain", "database", "network-programming"]
 
 [workspace.dependencies]
-# Sui dependencies — pinned to the latest `main` rev for reproducible builds.
-# When bumping the Sui SDK, update `rev` on ALL entries below to the same commit.
-# Current rev: be15a10386e78f5fa8d6be365a0fd228b22fa0c5
-sui-config = { git = "https://github.com/MystenLabs/sui.git", rev = "be15a10386e78f5fa8d6be365a0fd228b22fa0c5" }
-sui-json-rpc-api = { git = "https://github.com/MystenLabs/sui.git", rev = "be15a10386e78f5fa8d6be365a0fd228b22fa0c5" }
 sui-json-rpc-types = { git = "https://github.com/MystenLabs/sui.git", rev = "be15a10386e78f5fa8d6be365a0fd228b22fa0c5" }
 sui-rpc-api = { git = "https://github.com/MystenLabs/sui.git", rev = "be15a10386e78f5fa8d6be365a0fd228b22fa0c5" }
-sui-sdk = { git = "https://github.com/MystenLabs/sui.git", rev = "be15a10386e78f5fa8d6be365a0fd228b22fa0c5" }
-sui-sdk-types = { git = "https://github.com/MystenLabs/sui.git", rev = "be15a10386e78f5fa8d6be365a0fd228b22fa0c5" }
 sui-types = { git = "https://github.com/MystenLabs/sui.git", rev = "be15a10386e78f5fa8d6be365a0fd228b22fa0c5" }
 
 # Async runtime

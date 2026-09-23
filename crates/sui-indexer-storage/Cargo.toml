@@ -14,11 +14,9 @@ readme = "../../README.md"
 
 [dependencies]
 # Workspace dependencies
+sqlx = { workspace = true, features = ["bigdecimal"] }
 sui-indexer-config = { path = "../sui-indexer-config" }
 sui-indexer-events = { path = "../sui-indexer-events" }
-
-# Database
-sqlx.workspace = true
 
 # Serialization
 serde.workspace = true
@@ -38,7 +36,13 @@ uuid.workspace = true
 tracing.workspace = true
 
 # Hex encoding for BYTEA gateway output
+chain-core = { version = "0.1.0", path = "../chain-core" }
 hex.workspace = true
+
+[dev-dependencies]
+sui-json-rpc-types.workspace = true
+sui-types.workspace = true
+tokio.workspace = true
 
 [lints]
 workspace = true

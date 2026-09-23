@@ -105,9 +105,16 @@ impl EventFilterProcessor {
             }
         }
 
-        // Event type filter
+        // Event type filter: the bare Move name (`DepositEvent`) or any
+        // textual struct path, compared structurally so short (`0x2::…`)
+        // and canonical (`0x000…02::…`) forms both match.
         if let Some(expected_type) = &filter.event_type {
-            if event.type_.name.as_str() != expected_type {
+            if !event_type_matches(
+                &event.package_id,
+                event.transaction_module.as_str(),
+                event.type_.name.as_str(),
+                expected_type,
+            ) {
                 return false;
             }
         }
@@ -152,6 +159,37 @@ impl Default for EventFilterProcessor {
     fn default() -> Self {
         Self::new(vec![])
     }
+}
+
+/// Match an event type against a bare name or any textual struct path.
+/// Both sides are compared structurally (address, module, name), so
+/// `0x2::coin::Transfer` and its canonical `0x000…02::coin::Transfer` form
+/// match the same event.
+fn event_type_matches(
+    package_id: &sui_types::base_types::ObjectID,
+    module: &str,
+    name: &str,
+    expected: &str,
+) -> bool {
+    if name == expected {
+        return true;
+    }
+    let Ok(sui_types::TypeTag::Struct(tag)) = expected.parse::<sui_types::TypeTag>() else {
+        return false;
+    };
+    // Addresses compare normalized: `Display` pads differently across
+    // `ObjectID` and `AccountAddress`, so `0x2` must equal `0x000…02`.
+    norm_hex(&tag.address.to_string()) == norm_hex(&package_id.to_string())
+        && tag.module.as_str() == module
+        && tag.name.as_str() == name
+}
+
+/// Normalize a hex address for comparison (`0x` prefix and leading zeros off).
+fn norm_hex(value: &str) -> String {
+    value
+        .trim_start_matches("0x")
+        .trim_start_matches('0')
+        .to_owned()
 }
 
 /// Statistics about configured filters
@@ -306,5 +344,179 @@ mod tests {
 
         let deposit_filter = navi_deposit_events("0xabc123").unwrap();
         assert!(deposit_filter.event_type.unwrap().contains("DepositEvent"));
+    }
+
+    fn sample_event() -> SuiEvent {
+        SuiEvent {
+            id: sui_types::event::EventID {
+                tx_digest: sui_types::base_types::TransactionDigest::new([1; 32]),
+                event_seq: 0,
+            },
+            package_id: "0x0000000000000000000000000000000000000000000000000000000000000002"
+                .parse()
+                .expect("package"),
+            transaction_module: "coin".parse().expect("module"),
+            sender: "0x0000000000000000000000000000000000000000000000000000000000000001"
+                .parse()
+                .expect("sender"),
+            type_: "0x2::coin::Transfer".parse().expect("type"),
+            parsed_json: serde_json::json!({}),
+            bcs: sui_json_rpc_types::BcsEvent::new(vec![1, 2, 3]),
+            timestamp_ms: Some(1000),
+        }
+    }
+
+    #[test]
+    fn event_type_matches_bare_and_qualified_names() {
+        let event = sample_event();
+        let bare = EventFilterProcessor::new(vec![EventFilter {
+            package: None,
+            module: None,
+            event_type: Some("Transfer".to_string()),
+            sender: None,
+        }]);
+        assert!(bare.should_process_event(&event));
+        let qualified = EventFilterProcessor::new(vec![EventFilter {
+            package: None,
+            module: None,
+            event_type: Some(format!(
+                "{}::{}::{}",
+                event.package_id, event.transaction_module, event.type_.name
+            )),
+            sender: None,
+        }]);
+        assert!(qualified.should_process_event(&event));
+        // Short package form matches the same event (structural compare).
+        let short = EventFilterProcessor::new(vec![EventFilter {
+            package: None,
+            module: None,
+            event_type: Some("0x2::coin::Transfer".to_string()),
+            sender: None,
+        }]);
+        assert!(short.should_process_event(&event));
+        // Each path component gates independently.
+        for bad in [
+            "0x3::coin::Transfer",
+            "0x2::vault::Transfer",
+            "0x2::coin::Other",
+        ] {
+            let rejected = EventFilterProcessor::new(vec![EventFilter {
+                package: None,
+                module: None,
+                event_type: Some(bad.to_string()),
+                sender: None,
+            }]);
+            assert!(!rejected.should_process_event(&event), "{bad}");
+        }
+        let other = EventFilterProcessor::new(vec![EventFilter {
+            package: None,
+            module: None,
+            event_type: Some("DepositEvent".to_string()),
+            sender: None,
+        }]);
+        assert!(!other.should_process_event(&event));
+    }
+}
+
+#[cfg(test)]
+mod mismatch_tests {
+    use super::*;
+    use crate::test_support::sample_event;
+
+    fn processor_with(filter: EventFilter) -> EventFilterProcessor {
+        EventFilterProcessor::new(vec![filter])
+    }
+
+    #[test]
+    fn package_mismatch_rejects() {
+        let event = sample_event(1, "0x2", "coin", "Transfer", serde_json::json!({}));
+        let same = processor_with(EventFilter {
+            package: Some("0x2".to_string()),
+            module: None,
+            event_type: None,
+            sender: None,
+        });
+        assert!(same.should_process_event(&event));
+        let other = processor_with(EventFilter {
+            package: Some("0x3".to_string()),
+            module: None,
+            event_type: None,
+            sender: None,
+        });
+        assert!(!other.should_process_event(&event));
+        let invalid = processor_with(EventFilter {
+            package: Some("not-an-id".to_string()),
+            module: None,
+            event_type: None,
+            sender: None,
+        });
+        assert!(!invalid.should_process_event(&event));
+    }
+
+    #[test]
+    fn module_mismatch_rejects() {
+        let event = sample_event(1, "0x2", "coin", "Transfer", serde_json::json!({}));
+        let same = processor_with(EventFilter {
+            package: None,
+            module: Some("coin".to_string()),
+            event_type: None,
+            sender: None,
+        });
+        assert!(same.should_process_event(&event));
+        let other = processor_with(EventFilter {
+            package: None,
+            module: Some("vault".to_string()),
+            event_type: None,
+            sender: None,
+        });
+        assert!(!other.should_process_event(&event));
+    }
+
+    #[test]
+    fn sender_mismatch_rejects() {
+        let event = sample_event(1, "0x2", "coin", "Transfer", serde_json::json!({}));
+        let same = processor_with(EventFilter {
+            package: None,
+            module: None,
+            event_type: None,
+            sender: Some(
+                "0x0000000000000000000000000000000000000000000000000000000000000001".to_string(),
+            ),
+        });
+        assert!(same.should_process_event(&event));
+        let other = processor_with(EventFilter {
+            package: None,
+            module: None,
+            event_type: None,
+            sender: Some(
+                "0x0000000000000000000000000000000000000000000000000000000000000002".to_string(),
+            ),
+        });
+        assert!(!other.should_process_event(&event));
+        let invalid = processor_with(EventFilter {
+            package: None,
+            module: None,
+            event_type: None,
+            sender: Some("bogus".to_string()),
+        });
+        assert!(!invalid.should_process_event(&event));
+    }
+
+    #[test]
+    fn preprocessed_stats_reflect_configured_filters() {
+        let processor = EventFilterProcessor::new(vec![EventFilter {
+            package: Some("0x2".to_string()),
+            module: Some("coin".to_string()),
+            event_type: Some("Transfer".to_string()),
+            sender: Some(
+                "0x0000000000000000000000000000000000000000000000000000000000000001".to_string(),
+            ),
+        }]);
+        let stats = processor.filter_stats();
+        assert_eq!(stats.total_filters, 1);
+        assert_eq!(stats.package_filters, 1);
+        assert_eq!(stats.module_filters, 1);
+        assert_eq!(stats.event_type_filters, 1);
+        assert_eq!(stats.sender_filters, 1);
     }
 }

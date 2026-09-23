@@ -1,6 +1,12 @@
 # Sui Indexer Configuration
 # Complete example configuration file
 
+[chain]
+kind = "move"
+chain_id = "sui-testnet"
+endpoint = ""
+commitment = "finalized"
+
 [network]
 grpc_url = "https://fullnode.testnet.sui.io:443"
 network = "testnet"
@@ -74,3 +80,56 @@ max_bytes = 10485760
 [api]
 enabled = false
 listen = "127.0.0.1:8080"
+
+[clickhouse]
+enabled = false
+url = "http://localhost:8123"
+database = "indexer"
+analytics_database = "analytics"
+insert_chunk_rows = 10000
+insert_retries = 3
+
+[rule_host]
+fuel = 5000000000
+max_memory_mb = 512
+abi_versions = [1]
+
+# User-defined indexing jobs: a job is data, not a process.
+# A logic change creates a new versioned table and triggers a re-scan.
+[[jobs]]
+name = "sui-transfers"
+version = 1
+source = "events"
+tier = "sql"
+desired = "active"
+state = "none"
+sql = "SELECT height AS _height, 1 AS _rule_version, 1 AS _commitment, emitter, topics FROM chain_events WHERE height >= {lo} AND height < {hi}"
+
+[jobs.window]
+lookback = 1
+lookahead = 0
+
+[jobs.filter]
+emitters = []
+topics = []
+
+[jobs.scan]
+from = 0
+to = "head"
+chunk = 10000
+priority = "backfill"
+
+[jobs.output]
+table = "job_sui_transfers"
+order_by = ["height"]
+engine = "ReplacingMergeTree"
+partition_by = "toYYYYMM(block_ts)"
+ttl = ""
+reorg_mode = "block_scoped"
+pg_hot = ""
+
+[jobs.runtime]
+fuel = 5000000000
+max_memory_mb = 512
+max_rows_per_window = 100000
+max_rows_per_second = 50000

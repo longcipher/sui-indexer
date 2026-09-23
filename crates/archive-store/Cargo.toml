@@ -1,0 +1,28 @@
+[package]
+name = "archive-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+documentation.workspace = true
+authors.workspace = true
+description = "Tiered archive: ClickHouse columnar store, batch sink, tier router, boundary keeper"
+rust-version.workspace = true
+keywords = ["clickhouse", "blockchain", "indexer", "archive"]
+categories = ["database"]
+readme = "../../README.md"
+
+[dependencies]
+async-trait.workspace = true
+eyre.workspace = true
+job-engine = { version = "0.1.0", path = "../job-engine" }
+reqwest.workspace = true
+serde_json.workspace = true
+sui-indexer-config = { path = "../sui-indexer-config" }
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[lints]
+workspace = true

@@ -41,6 +41,12 @@ impl PostgresStorage {
     pub fn pool(&self) -> &PgPool {
         &self.pool
     }
+
+    /// Build from an existing pool (tests, shared pools, lazy offline pools).
+    #[must_use]
+    pub fn from_pool(pool: PgPool) -> Self {
+        Self { pool }
+    }
 }
 
 #[async_trait]
@@ -230,8 +236,8 @@ impl Storage for PostgresStorage {
         .await?;
 
         sqlx::query(
-            "INSERT INTO indexer_state (checkpoint_sequence, updated_at)
-             VALUES ($1, NOW())
+            "INSERT INTO indexer_state (id, checkpoint_sequence, updated_at)
+             VALUES (1, $1, NOW())
              ON CONFLICT (id)
              DO UPDATE SET checkpoint_sequence = GREATEST(indexer_state.checkpoint_sequence, EXCLUDED.checkpoint_sequence), updated_at = NOW()",
         )
@@ -470,6 +476,24 @@ impl Storage for PostgresStorage {
         Ok(())
     }
 
+    async fn rewind_continuous(&self, pipeline: &str, checkpoint: u64) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO indexer_progress (pipeline, continuous_checkpoint, floor_checkpoint, updated_at)
+             VALUES ($1, $2, $2, NOW())
+             ON CONFLICT (pipeline)
+             DO UPDATE SET
+                continuous_checkpoint = EXCLUDED.continuous_checkpoint,
+                floor_checkpoint = LEAST(indexer_progress.floor_checkpoint, EXCLUDED.floor_checkpoint),
+                digest = NULL,
+                updated_at = NOW()",
+        )
+        .bind(pipeline)
+        .bind(checkpoint as i64)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     async fn query_events(&self, filter: EventQueryFilter<'_>) -> Result<Vec<ProcessedEvent>> {
         let mut builder = sqlx::QueryBuilder::new(
             "SELECT id, event_data, transaction_digest, checkpoint_sequence,
@@ -583,8 +607,8 @@ impl Storage for PostgresStorage {
                         .map(|v| serde_json::json!(v))
                         .unwrap_or(serde_json::Value::Null)
                 } else if type_name.contains("NUMERIC") {
-                    row.try_get::<String, _>(column.name())
-                        .map(|v| serde_json::json!(v))
+                    row.try_get::<sqlx::types::BigDecimal, _>(column.name())
+                        .map(|v| serde_json::json!(trim_numeric(&v.to_string())))
                         .unwrap_or(serde_json::Value::Null)
                 } else if type_name.contains("JSON") {
                     row.try_get::<serde_json::Value, _>(column.name())
@@ -594,8 +618,15 @@ impl Storage for PostgresStorage {
                         .map(|v| serde_json::json!(hex::encode(v)))
                         .unwrap_or(serde_json::Value::Null)
                 } else if type_name.contains("TIMESTAMPTZ") || type_name.contains("TIMESTAMP") {
+                    // Timezone-aware first; naive timestamps are read as UTC.
+                    // (`TIMESTAMPTZ` contains `TIMESTAMP` as a substring, so
+                    // the second disjunct only fires for naive columns.)
                     row.try_get::<chrono::DateTime<chrono::Utc>, _>(column.name())
                         .map(|v| serde_json::json!(v))
+                        .or_else(|_| {
+                            row.try_get::<chrono::NaiveDateTime, _>(column.name())
+                                .map(|v| serde_json::json!(v.and_utc()))
+                        })
                         .unwrap_or(serde_json::Value::Null)
                 } else if type_name.contains("UUID") {
                     row.try_get::<uuid::Uuid, _>(column.name())
@@ -676,15 +707,25 @@ impl Storage for PostgresStorage {
                 coin_type, holder, object_id, version, balance
             ) ",
         );
-        query_builder.push_values(flows, |mut b, flow| {
+        // Balances land in NUMERIC(78,0): parse loudly so a malformed value
+        // fails the write instead of coercing silently.
+        let decimals: Vec<sqlx::types::BigDecimal> = flows
+            .iter()
+            .map(|flow| {
+                balance_to_numeric(&flow.balance)
+                    .parse()
+                    .map_err(|_| eyre::eyre!("invalid coin balance: {}", flow.balance))
+            })
+            .collect::<Result<_, _>>()?;
+        query_builder.push_values(flows.iter().zip(decimals), |mut b, (flow, decimal)| {
             b.push_bind(flow.checkpoint_sequence)
                 .push_bind(flow.timestamp_ms)
-                .push_bind(flow.transaction_digest)
-                .push_bind(flow.coin_type)
-                .push_bind(flow.holder)
-                .push_bind(flow.object_id)
+                .push_bind(&flow.transaction_digest)
+                .push_bind(&flow.coin_type)
+                .push_bind(&flow.holder)
+                .push_bind(&flow.object_id)
                 .push_bind(flow.version)
-                .push_bind(balance_to_numeric(&flow.balance));
+                .push_bind(decimal);
         });
         query_builder.push(
             " ON CONFLICT (object_id, version) DO UPDATE SET
@@ -693,11 +734,15 @@ impl Storage for PostgresStorage {
         );
 
         query_builder.build().execute(&self.pool).await?;
-        self.refresh_coin_insights().await?;
+        self.refresh_coin_insights_for(&flows).await?;
         Ok(())
     }
 
     async fn claim_repair_entries(&self, limit: usize) -> Result<Vec<RepairQueueEntry>> {
+        // NOTE: `SKIP LOCKED` without an enclosing transaction only
+        // coordinates threads sharing this pool. Across replicas it is
+        // best-effort: the single-process deployment owns the queue, and
+        // duplicate work remains idempotent via `ON CONFLICT DO NOTHING`.
         let entries = sqlx::query_as::<_, RepairQueueEntry>(
             "SELECT checkpoint_sequence, attempts, next_retry_at, last_error,
                     parked, created_at, updated_at
@@ -916,10 +961,16 @@ impl Storage for PostgresStorage {
 impl PostgresStorage {
     /// Refresh balance snapshots and coin metadata from fresh flows.
     async fn refresh_coin_insights(&self) -> Result<()> {
+        // Full repair path: every object counts exactly once, at its latest
+        // version and current holder. (The hot path uses the scoped variant.)
         sqlx::query(
             "INSERT INTO balance_snapshots (holder, coin_type, balance, checkpoint_sequence, updated_at)
              SELECT holder, coin_type, SUM(balance), MAX(checkpoint_sequence), NOW()
-             FROM coin_flows
+             FROM (
+               SELECT DISTINCT ON (object_id) holder, coin_type, balance, checkpoint_sequence
+               FROM coin_flows
+               ORDER BY object_id, version DESC
+             ) latest
              GROUP BY holder, coin_type
              ON CONFLICT (holder, coin_type)
              DO UPDATE SET
@@ -948,10 +999,15 @@ impl PostgresStorage {
 }
 
 /// Convert a balance JSON value into a NUMERIC(78,0)-compatible string.
+/// Prefers a real numeric parse so `"1.5"` stays `1.5` (never `15`); falls
+/// back to digit filtering for coin-specific encodings, then zero.
 fn balance_to_numeric(balance: &serde_json::Value) -> String {
     match balance {
         serde_json::Value::Number(number) => number.to_string(),
         serde_json::Value::String(text) => {
+            if let Ok(decimal) = text.parse::<sqlx::types::BigDecimal>() {
+                return decimal.to_string();
+            }
             let digits: String = text.chars().filter(|c| c.is_ascii_digit()).collect();
             if digits.is_empty() {
                 "0".to_string()
@@ -998,6 +1054,19 @@ fn processed_transaction_from_row(row: sqlx::postgres::PgRow) -> Result<Processe
     })
 }
 
+/// Render a NUMERIC value without wire-format scale noise (`1.5000` → `1.5`).
+fn trim_numeric(raw: &str) -> String {
+    let Some((int, frac)) = raw.split_once('.') else {
+        return raw.to_owned();
+    };
+    let frac = frac.trim_end_matches('0');
+    if frac.is_empty() {
+        int.to_owned()
+    } else {
+        format!("{int}.{frac}")
+    }
+}
+
 /// Redact connection details from database errors before surfacing them.
 fn sanitize_sql_error(error: &sqlx::Error) -> eyre::Error {
     let mut message = error.to_string();
@@ -1008,4 +1077,126 @@ fn sanitize_sql_error(error: &sqlx::Error) -> eyre::Error {
         message.truncate(500);
     }
     eyre::eyre!("query failed: {message}")
+}
+
+impl PostgresStorage {
+    /// Recompute snapshots for holders touched by `flows` (plus holders
+    /// superseded by them). Scoped to affected pairs so the steady-state
+    /// cost stays proportional to the batch, not the table.
+    async fn refresh_coin_insights_for(&self, flows: &[CoinFlowModel]) -> Result<()> {
+        use std::collections::{BTreeMap, BTreeSet};
+        if flows.is_empty() {
+            return Ok(());
+        }
+        // Pairs credited by this batch...
+        let mut pairs: BTreeSet<(String, String)> = flows
+            .iter()
+            .map(|flow| (flow.holder.clone(), flow.coin_type.clone()))
+            .collect();
+        // ...plus pairs superseded by it (moves credit a new holder while
+        // the old holder's rows stay behind).
+        let mut builder = sqlx::QueryBuilder::new(
+            "SELECT DISTINCT holder, coin_type FROM coin_flows WHERE object_id IN (",
+        );
+        {
+            let mut separated = builder.separated(", ");
+            for flow in flows {
+                separated.push_bind(&flow.object_id);
+            }
+        }
+        builder.push(")");
+        let superseded: Vec<(String, String)> =
+            builder.build_query_as().fetch_all(&self.pool).await?;
+        pairs.extend(superseded);
+
+        for (holder, coin_type) in &pairs {
+            sqlx::query(
+                "INSERT INTO balance_snapshots (holder, coin_type, balance, checkpoint_sequence, updated_at)
+                 SELECT $1, $2, COALESCE(SUM(latest.balance), 0),
+                        COALESCE(MAX(latest.checkpoint_sequence), 0), NOW()
+                 FROM (
+                   SELECT DISTINCT ON (f.object_id)
+                     f.holder, f.coin_type, f.balance, f.checkpoint_sequence
+                   FROM coin_flows f
+                   WHERE f.object_id IN (
+                     SELECT object_id FROM coin_flows WHERE holder = $1 AND coin_type = $2
+                   )
+                   ORDER BY f.object_id, f.version DESC
+                 ) latest
+                 WHERE latest.holder = $1 AND latest.coin_type = $2
+                 ON CONFLICT (holder, coin_type)
+                 DO UPDATE SET
+                    balance = EXCLUDED.balance,
+                    checkpoint_sequence = EXCLUDED.checkpoint_sequence,
+                    updated_at = NOW()",
+            )
+            .bind(holder)
+            .bind(coin_type)
+            .execute(&self.pool)
+            .await?;
+        }
+
+        // Merge coin metadata incrementally: no full scan.
+        let mut coins: BTreeMap<&str, (i64, i64, i64)> = BTreeMap::new();
+        for flow in flows {
+            let entry = coins
+                .entry(flow.coin_type.as_str())
+                .or_insert((i64::MAX, 0, 0));
+            entry.0 = entry.0.min(flow.checkpoint_sequence);
+            entry.1 = entry.1.max(flow.checkpoint_sequence);
+            entry.2 += 1;
+        }
+        for (coin_type, (first, last, count)) in coins {
+            let current: Option<(i64, i64)> = sqlx::query_as(
+                "SELECT first_seen_checkpoint, last_seen_checkpoint
+                 FROM coin_metadata WHERE coin_type = $1",
+            )
+            .bind(coin_type)
+            .fetch_optional(&self.pool)
+            .await?;
+            let (first_seen, last_seen) = current.unwrap_or((first, last));
+            sqlx::query(
+                "INSERT INTO coin_metadata
+                   (coin_type, first_seen_checkpoint, last_seen_checkpoint, flow_count, updated_at)
+                 VALUES ($1, $2, $3, $4, NOW())
+                 ON CONFLICT (coin_type)
+                 DO UPDATE SET
+                    first_seen_checkpoint = LEAST(coin_metadata.first_seen_checkpoint, EXCLUDED.first_seen_checkpoint),
+                    last_seen_checkpoint = GREATEST(coin_metadata.last_seen_checkpoint, EXCLUDED.last_seen_checkpoint),
+                    flow_count = coin_metadata.flow_count + EXCLUDED.flow_count,
+                    updated_at = NOW()",
+            )
+            .bind(coin_type)
+            .bind(first_seen.min(first))
+            .bind(last_seen.max(last))
+            .bind(count)
+            .execute(&self.pool)
+            .await?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn balances_parse_numerically_before_filtering() {
+        assert_eq!(balance_to_numeric(&serde_json::json!(100)), "100");
+        assert_eq!(balance_to_numeric(&serde_json::json!("200")), "200");
+        assert_eq!(balance_to_numeric(&serde_json::json!("1.5")), "1.5");
+        assert_eq!(balance_to_numeric(&serde_json::json!("abc")), "0");
+        assert_eq!(balance_to_numeric(&serde_json::json!(true)), "0");
+    }
+
+    #[test]
+    fn numeric_display_trims_scale_noise() {
+        assert_eq!(trim_numeric("1.5000"), "1.5");
+        assert_eq!(trim_numeric("300"), "300");
+        assert_eq!(trim_numeric("0.000"), "0");
+        assert_eq!(trim_numeric("1.50"), "1.5");
+        assert_eq!(trim_numeric("-2.340"), "-2.34");
+        assert_eq!(trim_numeric("42"), "42");
+    }
 }

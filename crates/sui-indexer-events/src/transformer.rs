@@ -321,3 +321,148 @@ pub mod protocol_transformers {
 }
 
 // Tests will be implemented once the SuiEvent API is stable
+
+#[cfg(test)]
+mod tests {
+    use super::super::test_support::{navi_deposit_event, sample_event};
+    use super::*;
+
+    #[tokio::test]
+    async fn fields_flatten_parsed_json_and_envelope() {
+        let transformer = EventTransformer::new();
+        let event = sample_event(
+            3,
+            "0x2",
+            "coin",
+            "Transfer",
+            serde_json::json!({"amount": 9}),
+        );
+        let processed = transformer.transform_event(event).await.expect("transform");
+        assert_eq!(processed.event_type, "Transfer");
+        assert_eq!(processed.module_name, "coin");
+        assert_eq!(processed.fields["amount"], serde_json::json!(9));
+        assert_eq!(
+            processed.fields["package_id"],
+            serde_json::json!("0x0000000000000000000000000000000000000000000000000000000000000002")
+        );
+        assert_eq!(processed.fields["event_sequence"], serde_json::json!(3));
+        assert!(processed.fields.get("bcs_hex").is_some());
+        assert_eq!(processed.metadata.event_index, 3);
+    }
+
+    #[tokio::test]
+    async fn config_flags_control_raw_and_custom_fields() {
+        let plain = EventTransformer::with_config(false, false);
+        let event = navi_deposit_event();
+        let processed = plain.transform_event(event).await.expect("transform");
+        assert!(processed.fields.get("bcs_hex").is_none());
+        assert!(processed.fields.get("protocol").is_none());
+        assert!(processed.fields.get("action").is_none());
+
+        let full = EventTransformer::with_config(true, true);
+        let processed = full
+            .transform_event(navi_deposit_event())
+            .await
+            .expect("transform");
+        assert!(processed.fields.get("bcs_hex").is_some());
+        assert_eq!(processed.fields["protocol"], serde_json::json!("navi"));
+    }
+
+    #[tokio::test]
+    async fn empty_bcs_emits_no_raw_keys() {
+        let transformer = EventTransformer::new();
+        let mut event = sample_event(1, "0x2", "coin", "Transfer", serde_json::json!({}));
+        event.bcs = sui_json_rpc_types::BcsEvent::new(vec![]);
+        let processed = transformer.transform_event(event).await.expect("transform");
+        assert!(processed.fields.get("bcs_hex").is_none());
+        assert!(processed.fields.get("bcs_bytes").is_none());
+    }
+
+    #[tokio::test]
+    async fn navi_deposit_extracts_amounts_and_tags() {
+        let transformer = EventTransformer::new();
+        let processed = transformer
+            .transform_event(navi_deposit_event())
+            .await
+            .expect("transform");
+        assert_eq!(processed.fields["protocol"], serde_json::json!("navi"));
+        assert_eq!(processed.fields["action"], serde_json::json!("deposit"));
+        assert_eq!(processed.fields["deposit_amount"], serde_json::json!(1_000));
+        assert_eq!(
+            processed.fields["asset_id"],
+            serde_json::json!("0x2::sui::SUI")
+        );
+        assert_eq!(processed.fields["user_address"], serde_json::json!("0xabc"));
+        assert_eq!(processed.fields["pool_id"], serde_json::json!("0xpool"));
+        assert_eq!(processed.fields["success"], serde_json::json!(true));
+        assert!(processed.metadata.tags.contains(&"navi".to_string()));
+        assert!(processed.metadata.tags.contains(&"lending".to_string()));
+        assert!(processed.metadata.tags.contains(&"deposit".to_string()));
+    }
+
+    #[tokio::test]
+    async fn navi_action_variants_tag_correctly() {
+        let transformer = EventTransformer::new();
+        for (name, action, tag) in [
+            ("WithdrawEvent", "withdraw", "withdraw"),
+            ("BorrowEvent", "borrow", "borrow"),
+            ("RepayEvent", "repay", "repay"),
+        ] {
+            let event = sample_event(
+                1,
+                "0xa99b8952d4f7d947ea77fe0ecdcc9e5fc0bcab2841d6e2a5aa00c3044e5544b5",
+                "lending",
+                name,
+                serde_json::json!({}),
+            );
+            let processed = transformer.transform_event(event).await.expect("transform");
+            assert_eq!(processed.fields["action"], serde_json::json!(action));
+            assert!(processed.metadata.tags.contains(&tag.to_string()));
+        }
+    }
+
+    #[tokio::test]
+    async fn non_navi_events_carry_no_protocol_fields() {
+        let transformer = EventTransformer::new();
+        let processed = transformer
+            .transform_event(sample_event(
+                1,
+                "0x2",
+                "coin",
+                "Transfer",
+                serde_json::json!({}),
+            ))
+            .await
+            .expect("transform");
+        assert!(processed.fields.get("protocol").is_none());
+        assert!(!processed.metadata.tags.contains(&"navi".to_string()));
+        assert!(processed.metadata.tags.contains(&"coin".to_string()));
+    }
+
+    #[tokio::test]
+    async fn batch_transform_skips_nothing_valid() {
+        let transformer = EventTransformer::new();
+        let events = vec![
+            sample_event(1, "0x2", "coin", "Transfer", serde_json::json!({})),
+            sample_event(2, "0x2", "coin", "Transfer", serde_json::json!({})),
+        ];
+        let processed = transformer.transform_events(events).await.expect("batch");
+        assert_eq!(processed.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn navi_transformer_adds_defi_tags() {
+        let transformer = protocol_transformers::NaviEventTransformer::new();
+        let processed = transformer
+            .transform_navi_event(navi_deposit_event())
+            .await
+            .expect("transform");
+        assert!(processed.metadata.tags.contains(&"defi".to_string()));
+        assert!(
+            processed
+                .metadata
+                .tags
+                .contains(&"navi-protocol".to_string())
+        );
+    }
+}

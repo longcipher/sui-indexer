@@ -239,3 +239,166 @@ impl Default for BatchProcessor {
         Self::new(100)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::sample_event;
+
+    fn allow_all() -> BatchProcessor {
+        BatchProcessor::new(10)
+    }
+
+    #[test]
+    fn components_and_getters() {
+        let processor = BatchProcessor::with_components(
+            EventTransformer::default(),
+            EventFilterProcessor::default(),
+            7,
+            Duration::from_secs(9),
+        );
+        assert_eq!(processor.batch_size(), 7);
+        assert_eq!(processor.batch_timeout(), Duration::from_secs(9));
+        assert_eq!(BatchProcessor::default().batch_size(), 100);
+    }
+
+    #[tokio::test]
+    async fn event_batch_filters_then_transforms() {
+        let processor = BatchProcessor::with_components(
+            EventTransformer::default(),
+            EventFilterProcessor::new(vec![sui_indexer_config::EventFilter {
+                package: Some("0x2".to_string()),
+                module: None,
+                event_type: None,
+                sender: None,
+            }]),
+            10,
+            Duration::from_secs(5),
+        );
+        let events = vec![
+            sample_event(1, "0x2", "coin", "Transfer", serde_json::json!({})),
+            sample_event(2, "0x3", "sui_system", "Other", serde_json::json!({})),
+        ];
+        let processed = processor.process_event_batch(events).await.expect("batch");
+        assert_eq!(processed.len(), 1);
+        assert_eq!(processed[0].event_type, "Transfer");
+    }
+
+    #[tokio::test]
+    async fn transaction_batch_extracts_status_gas_and_counts() {
+        let processor = allow_all();
+        let tx = sample_transaction(4, Some(1000), true);
+        let processed = processor
+            .process_transaction_batch(vec![tx])
+            .await
+            .expect("batch");
+        assert_eq!(processed.len(), 1);
+        assert_eq!(processed[0].checkpoint_sequence, 4);
+        assert!(processed[0].metadata.success);
+        assert_eq!(processed[0].metadata.gas_used, Some(15));
+        assert_eq!(processed[0].metadata.event_count, 2);
+    }
+
+    #[tokio::test]
+    async fn transaction_without_effects_is_unsuccessful() {
+        let processor = allow_all();
+        let mut tx = sui_json_rpc_types::SuiTransactionBlockResponse::default();
+        tx.checkpoint = Some(9);
+        let processed = processor
+            .process_transaction_batch(vec![tx])
+            .await
+            .expect("batch");
+        assert_eq!(processed.len(), 1);
+        assert!(!processed[0].metadata.success);
+        assert_eq!(processed[0].metadata.gas_used, None);
+        assert_eq!(processed[0].metadata.event_count, 0);
+    }
+
+    #[tokio::test]
+    async fn chunked_paths_cover_every_item() {
+        let processor = BatchProcessor::new(2);
+        let events: Vec<SuiEvent> = (0..5)
+            .map(|i| sample_event(i, "0x2", "coin", "Transfer", serde_json::json!({})))
+            .collect();
+        let mut processed = processor
+            .process_events_in_batches(events)
+            .await
+            .expect("batches");
+        processed.sort_by_key(|e| e.metadata.event_index);
+        assert_eq!(processed.len(), 5);
+
+        let txs = vec![
+            sui_json_rpc_types::SuiTransactionBlockResponse::default(),
+            sui_json_rpc_types::SuiTransactionBlockResponse::default(),
+            sui_json_rpc_types::SuiTransactionBlockResponse::default(),
+        ];
+        let done = processor
+            .process_transactions_in_batches(txs)
+            .await
+            .expect("batches");
+        assert_eq!(done.len(), 3);
+    }
+
+    fn sample_transaction(
+        checkpoint: u64,
+        timestamp_ms: Option<u64>,
+        success: bool,
+    ) -> sui_json_rpc_types::SuiTransactionBlockResponse {
+        use sui_json_rpc_types::{
+            OwnedObjectRef, SuiExecutionStatus, SuiObjectRef, SuiTransactionBlockEffects,
+            SuiTransactionBlockEffectsV1, SuiTransactionBlockEvents,
+        };
+        let addr = "0x0000000000000000000000000000000000000000000000000000000000000001";
+        let status = if success {
+            SuiExecutionStatus::Success
+        } else {
+            SuiExecutionStatus::Failure {
+                error: "abort".to_string(),
+            }
+        };
+        let gas_object = OwnedObjectRef {
+            owner: sui_types::object::Owner::AddressOwner(addr.parse().expect("addr")),
+            reference: SuiObjectRef {
+                object_id: addr.parse().expect("id"),
+                version: 1.into(),
+                digest: sui_types::digests::ObjectDigest::new([1; 32]),
+            },
+        };
+        let mut response = sui_json_rpc_types::SuiTransactionBlockResponse::default();
+        response.checkpoint = Some(checkpoint);
+        response.timestamp_ms = timestamp_ms;
+        response.effects = Some(SuiTransactionBlockEffects::V1(
+            SuiTransactionBlockEffectsV1 {
+                status,
+                executed_epoch: 1,
+                gas_used: sui_types::gas::GasCostSummary {
+                    computation_cost: 10,
+                    storage_cost: 5,
+                    storage_rebate: 0,
+                    non_refundable_storage_fee: 0,
+                },
+                modified_at_versions: vec![],
+                shared_objects: vec![],
+                transaction_digest: sui_types::base_types::TransactionDigest::new([9; 32]),
+                created: vec![],
+                mutated: vec![],
+                unwrapped: vec![],
+                deleted: vec![],
+                unwrapped_then_deleted: vec![],
+                wrapped: vec![],
+                accumulator_events: vec![],
+                gas_object,
+                events_digest: None,
+                dependencies: vec![],
+                abort_error: None,
+            },
+        ));
+        response.events = Some(SuiTransactionBlockEvents {
+            data: vec![
+                sample_event(1, "0x2", "coin", "Transfer", serde_json::json!({})),
+                sample_event(2, "0x2", "coin", "Transfer", serde_json::json!({})),
+            ],
+        });
+        response
+    }
+}

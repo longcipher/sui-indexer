@@ -163,3 +163,97 @@ impl Default for DefaultEventProcessor {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::sample_event;
+
+    struct EchoProcessor;
+
+    #[async_trait]
+    impl EventProcessor for EchoProcessor {
+        async fn process_event(&self, event: SuiEvent) -> Result<ProcessedEvent> {
+            Ok(ProcessedEvent {
+                id: Uuid::new_v4(),
+                event: event.clone(),
+                transaction_digest: event.id.tx_digest,
+                checkpoint_sequence: event.id.event_seq,
+                timestamp: Utc::now(),
+                package_id: event.package_id,
+                module_name: event.type_.module.to_string(),
+                event_type: event.type_.name.to_string(),
+                sender: event.sender.to_string(),
+                fields: serde_json::json!({}),
+                metadata: EventMetadata {
+                    processed_at: Utc::now(),
+                    processing_duration_ms: 0,
+                    event_index: event.id.event_seq as usize,
+                    matched_filters: vec![],
+                    tags: vec![],
+                },
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn default_batch_impl_preserves_order() {
+        let processor = EchoProcessor;
+        let events = vec![
+            sample_event(1, "0x2", "coin", "Transfer", serde_json::json!({})),
+            sample_event(2, "0x2", "coin", "Transfer", serde_json::json!({})),
+        ];
+        let processed = processor.process_events(events).await.expect("batch");
+        assert_eq!(processed.len(), 2);
+        assert_eq!(processed[0].checkpoint_sequence, 1);
+        assert_eq!(processed[1].checkpoint_sequence, 2);
+    }
+
+    #[tokio::test]
+    async fn default_processor_tags_navi_events() {
+        let processor = DefaultEventProcessor::new();
+        let navi = sample_event(
+            1,
+            "0x81c408448d0d57b3e371ea94de1d40bf852784d3e225de1e74acab3e8395c18f",
+            "lending",
+            "DepositEvent",
+            serde_json::json!({ "amount": 5 }),
+        );
+        let processed = processor.process_event(navi).await.expect("navi");
+        assert_eq!(processed.metadata.matched_filters, vec!["navi_protocol"]);
+        assert_eq!(processed.metadata.tags, vec!["navi", "defi"]);
+        assert_eq!(processed.event_type, "DepositEvent");
+    }
+
+    #[tokio::test]
+    async fn default_processor_leaves_other_events_untagged() {
+        let processor = DefaultEventProcessor::new();
+        let other = sample_event(1, "0x2", "coin", "Transfer", serde_json::json!({}));
+        let processed = processor.process_event(other).await.expect("other");
+        assert!(processed.metadata.matched_filters.is_empty());
+        assert!(processed.metadata.tags.is_empty());
+    }
+
+    #[tokio::test]
+    async fn default_processor_batch_handles_navi_variants() {
+        let processor = DefaultEventProcessor::new();
+        let package = "0x81c408448d0d57b3e371ea94de1d40bf852784d3e225de1e74acab3e8395c18f";
+        let events = [
+            "DepositEvent",
+            "BorrowEvent",
+            "WithdrawEvent",
+            "RepayEvent",
+            "Other",
+        ]
+        .iter()
+        .map(|name| sample_event(1, package, "lending", name, serde_json::json!({})))
+        .collect();
+        let processed = processor.process_events(events).await.expect("batch");
+        assert_eq!(processed.len(), 5);
+        assert!(
+            processed
+                .iter()
+                .all(|e| e.metadata.tags == vec!["navi", "defi"])
+        );
+    }
+}

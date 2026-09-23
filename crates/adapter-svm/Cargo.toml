@@ -1,0 +1,30 @@
+[package]
+name = "adapter-svm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+documentation.workspace = true
+authors.workspace = true
+description = "Solana (SVM) chain adapter: slots, skipped markers, inner instructions, discriminator decoding"
+rust-version.workspace = true
+keywords = ["solana", "svm", "blockchain", "indexer"]
+categories = ["cryptography::blockchain", "network-programming"]
+readme = "../../README.md"
+
+[dependencies]
+async-trait.workspace = true
+bs58 = "0.5.1"
+chain-core = { path = "../chain-core" }
+chrono.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+proptest = "1.9"
+
+[lints]
+workspace = true

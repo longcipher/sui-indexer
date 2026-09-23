@@ -16,8 +16,11 @@ use tracing::{debug, error, info, warn};
 
 // Local Sui client module
 pub mod api;
+pub mod api_jobs;
 pub mod archive;
 pub mod block_feed;
+pub mod chains;
+pub mod jobs;
 pub mod progress;
 pub mod query_gateway;
 pub mod repair;
@@ -25,6 +28,8 @@ pub mod sinks;
 pub mod sui;
 pub mod sync_engine;
 pub use block_feed::BlockFeed;
+pub use chains::{build_adapter, chain_id, chain_registry, resolve_chain};
+pub use jobs::JobRunner;
 pub use sui::SuiClient;
 
 /// Runtime counters for indexer observability.
@@ -84,6 +89,7 @@ pub struct IndexerCore {
     event_processor: Arc<dyn EventProcessor>,
     metrics: Arc<IndexerMetrics>,
     block_feed: Arc<BlockFeed>,
+    job_metrics: Arc<job_engine::JobMetricsRegistry>,
 }
 
 impl IndexerCore {
@@ -102,6 +108,7 @@ impl IndexerCore {
             event_processor,
             metrics: Arc::new(IndexerMetrics::default()),
             block_feed: Arc::new(BlockFeed::new(256)),
+            job_metrics: Arc::new(job_engine::JobMetricsRegistry::new()),
         })
     }
 
@@ -122,7 +129,13 @@ impl IndexerCore {
             event_processor,
             metrics: Arc::new(IndexerMetrics::default()),
             block_feed: Arc::new(BlockFeed::new(256)),
+            job_metrics: Arc::new(job_engine::JobMetricsRegistry::new()),
         })
+    }
+
+    /// Access the per-job metrics registry served by `/metrics`.
+    pub fn job_metrics(&self) -> &Arc<job_engine::JobMetricsRegistry> {
+        &self.job_metrics
     }
 
     /// Access the live checkpoint feed for SSE streaming.
@@ -201,6 +214,71 @@ impl IndexerCore {
         let resume_from = self.resolve_resume_checkpoint().await?;
         info!("Resuming from checkpoint {resume_from}");
 
+        // One process serves one chain plus N jobs: spawn the reconciler when
+        // jobs are configured. Adapter failures degrade to no-jobs rather
+        // than breaking the Sui pipeline.
+        if jobs_enabled(&self.config) {
+            match crate::chains::resolve_chain(&self.config) {
+                Ok((_kind, chain_id, _endpoint)) => {
+                    match crate::chains::build_adapter(&self.config).await {
+                        Ok(adapter) => {
+                            let runner = crate::jobs::JobRunner::new(
+                                chain_id.clone(),
+                                adapter,
+                                self.storage.clone(),
+                                self.config.jobs.clone(),
+                                self.config.clickhouse.clone(),
+                                Arc::clone(&self.job_metrics),
+                            );
+                            info!(
+                                "Starting job runner for chain {chain_id} with {} job(s)",
+                                self.config.jobs.len()
+                            );
+                            tokio::spawn(async move {
+                                if let Err(e) = runner.run().await {
+                                    warn!("Job runner exited: {e:#}");
+                                }
+                            });
+                        }
+                        Err(e) => warn!("Job runner disabled (adapter): {e:#}"),
+                    }
+                }
+                Err(e) => warn!("Job runner disabled (chain config): {e:#}"),
+            }
+        }
+
+        // Cold archive sidecar: periodically persist committed checkpoints
+        // outside PostgreSQL. The `--archive` flag enables this; without it
+        // no archive writes happen.
+        if self.config.archive.enabled {
+            let writer = crate::archive::ArchiveWriter::new(self.config.archive.clone());
+            let storage = self.storage.clone();
+            let metrics = Arc::clone(&self.metrics);
+            info!("Starting archive writer");
+            tokio::spawn(async move {
+                let mut next = storage
+                    .get_progress("default")
+                    .await
+                    .ok()
+                    .flatten()
+                    .and_then(|progress| progress.archive_hi)
+                    .unwrap_or(0)
+                    .max(0) as u64
+                    + 1;
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+                loop {
+                    interval.tick().await;
+                    let committed = metrics.committed_checkpoint.load(Ordering::Relaxed);
+                    if let Some((from, to)) = archive_window_to_catch_up(next, committed) {
+                        match writer.archive_range(&storage, "default", from, to).await {
+                            Ok(_) => next = to.saturating_add(1),
+                            Err(e) => warn!("Archive writer failed: {e:#}"),
+                        }
+                    }
+                }
+            });
+        }
+
         match self.config.events.ingestion_mode {
             IngestionMode::Stream => self.run_stream(resume_from).await,
             IngestionMode::Poll => self.run_poll(resume_from).await,
@@ -212,7 +290,6 @@ impl IndexerCore {
     pub async fn resolve_resume_checkpoint(&self) -> Result<u64> {
         progress::Progress::resolve_resume(&self.storage, self.config.events.start_checkpoint).await
     }
-
     /// Stream mode: dual-lane sync engine (tip tracker + historical
     /// backfiller) with contiguous commit, repair queue enqueue, and digest
     /// verification. Failures requeue without skipping checkpoints.
@@ -447,7 +524,10 @@ impl IndexerCore {
         let index_objects = self.config.events.index_objects;
         let sinks = self.config.sinks.clone();
         let alerts = self.config.alerts.clone();
+        let chain_id = crate::chains::chain_id(&self.config);
+        let capture_skeleton = jobs_enabled(&self.config);
         let webhook_client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
 
@@ -462,6 +542,7 @@ impl IndexerCore {
                 let sinks = sinks.clone();
                 let alerts = alerts.clone();
                 let webhook_client = webhook_client.clone();
+                let chain_id = chain_id.clone();
                 async move {
                     let pipeline = CheckpointPipeline {
                         filter: &filter,
@@ -470,6 +551,8 @@ impl IndexerCore {
                         sinks: &sinks,
                         alerts: &alerts,
                         webhook_client: &webhook_client,
+                        chain_id: &chain_id,
+                        capture_skeleton,
                     };
                     let mut outcomes: BTreeMap<u64, CheckpointOutcome> = BTreeMap::new();
                     let mut failures: Vec<(u64, String)> = Vec::new();
@@ -492,9 +575,10 @@ impl IndexerCore {
                                 metrics
                                     .transactions_processed
                                     .fetch_add(outcome.transactions, Ordering::Relaxed);
-                                metrics
-                                    .committed_checkpoint
-                                    .store(sequence, Ordering::Relaxed);
+                                // NOTE: `committed_checkpoint` is stored only in
+                                // `commit_contiguous` below: this block runs
+                                // inside `buffer_unordered` and would otherwise
+                                // publish checkpoints out of order.
                                 outcomes.insert(sequence, outcome);
                             }
                             Err(e) => {
@@ -545,6 +629,10 @@ impl IndexerCore {
         self.storage
             .advance_continuous("default", committed, start, None)
             .await?;
+        // Single ordered publish point for the committed gauge.
+        self.metrics
+            .committed_checkpoint
+            .store(committed, Ordering::Relaxed);
         if let Some(retention) = self.config.events.retention {
             self.storage.prune_checkpoints(committed, retention).await?;
         }
@@ -689,6 +777,10 @@ struct CheckpointPipeline<'a> {
     sinks: &'a [sui_indexer_config::WebhookSink],
     alerts: &'a [sui_indexer_config::AlertRule],
     webhook_client: &'a reqwest::Client,
+    /// Stable chain key for the skeleton tables (broad base capture).
+    chain_id: &'a str,
+    /// Whether to land skeleton rows (only when jobs are configured).
+    capture_skeleton: bool,
 }
 
 /// Process one full checkpoint: verify continuity, extract events, filter,
@@ -708,6 +800,22 @@ async fn process_single_checkpoint(
     let checkpoint = client.get_full_checkpoint(sequence).await?;
     let summary = checkpoint.summary.data();
     let timestamp_ms = summary.timestamp_ms;
+    // Broad base capture for the job engine: the adapter decodes the same
+    // checkpoint into skeleton rows, so later re-scans replay the archive
+    // (path A) instead of RPC. Best-effort: never fail the checkpoint.
+    // Skipped entirely without jobs: pure overhead otherwise.
+    if pipeline.capture_skeleton {
+        let decoded = adapter_move::decode::decode_checkpoint(&checkpoint);
+        if let Err(e) = sui_indexer_storage::store_decoded_block(
+            storage.postgres().pool(),
+            pipeline.chain_id,
+            &decoded,
+        )
+        .await
+        {
+            warn!("Skeleton capture for checkpoint {sequence} failed: {e:#}");
+        }
+    }
     let mut outcome = CheckpointOutcome::default();
     let mut transaction_models = Vec::new();
     let mut object_models = Vec::new();
@@ -1019,11 +1127,22 @@ fn grpc_event_to_sui_event(
     Some(sui_event)
 }
 
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
+/// Whether the job runner spawns: one process serves one chain plus N jobs.
+fn jobs_enabled(config: &sui_indexer_config::IndexerConfig) -> bool {
+    !config.jobs.is_empty()
 }
 
-/// Longest gap-free prefix of [start, end] present in `succeeded`.
+/// Next archive window, if the committed frontier advanced past `next`.
+/// Pure helper so the cadence logic is unit-testable without timers.
+fn archive_window_to_catch_up(next: u64, committed: u64) -> Option<(u64, u64)> {
+    if next > 0 && committed >= next {
+        Some((next, committed))
+    } else {
+        None
+    }
+}
+
+/// Longest gap-free prefix of `[start, end]` present in `succeeded`.
 fn contiguous_prefix(start: u64, end: u64, succeeded: &BTreeSet<u64>) -> Option<u64> {
     let mut cursor = start;
     let mut committed = None;
@@ -1042,10 +1161,113 @@ fn contiguous_prefix(start: u64, end: u64, succeeded: &BTreeSet<u64>) -> Option<
 mod tests {
     use super::*;
 
+    fn native_event(package: &str, contents: Vec<u8>) -> sui_types::event::Event {
+        sui_types::event::Event {
+            package_id: package.parse().expect("package"),
+            transaction_module: "coin".parse().expect("module"),
+            sender: "0x0000000000000000000000000000000000000000000000000000000000000001"
+                .parse()
+                .expect("sender"),
+            type_: "0x2::coin::Transfer".parse().expect("type"),
+            contents,
+        }
+    }
+
     #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
+    fn move_event_fields_carries_the_envelope() {
+        // BCS bytes are not self-describing, so untyped decoding falls back
+        // to the envelope: this is the live path, asserted here.
+        let fields = move_event_fields(&native_event("0x2", vec![1, 2, 3]));
+        assert!(fields.get("package").is_some());
+        assert_eq!(fields["module"], serde_json::json!("coin"));
+        assert!(fields.get("event_type").is_some());
+        assert!(fields.get("sender").is_some());
+        assert_eq!(fields["bcs_bytes"], serde_json::json!(3));
+    }
+
+    #[test]
+    fn move_event_fields_empty_bytes_have_no_raw_keys() {
+        let fields = move_event_fields(&native_event("0x2", vec![]));
+        assert!(fields.get("package").is_some());
+        assert_eq!(fields["bcs_bytes"], serde_json::json!(0));
+    }
+
+    #[test]
+    fn move_event_fields_invalid_bytes_keep_envelope() {
+        let fields = move_event_fields(&native_event("0x2", vec![0xff, 0xff]));
+        assert!(fields.get("package").is_some());
+        assert!(fields.get("bcs_bytes").is_some());
+    }
+
+    fn grpc_event(package: Option<&str>, type_: Option<&str>) -> crate::sui::Event {
+        crate::sui::Event {
+            event_type: None,
+            package_id: package.map(str::to_owned),
+            transaction_module: Some("coin".to_owned()),
+            sender: Some(
+                "0x0000000000000000000000000000000000000000000000000000000000000001".to_owned(),
+            ),
+            type_: type_.map(str::to_owned),
+            contents: Some(serde_json::json!({
+                "transaction_digest": sui_types::base_types::TransactionDigest::new([1; 32]).to_string(),
+                "event_index": 3,
+            })),
+            bcs: None,
+        }
+    }
+
+    #[test]
+    fn grpc_events_convert_or_reject() {
+        use sui_indexer_events::EventFilterProcessor;
+        let allow = EventFilterProcessor::new(vec![]);
+        let event = grpc_event(Some("0x2"), Some("0x2::coin::Transfer"));
+        let converted = grpc_event_to_sui_event(&event, &allow, 9).expect("converts");
+        assert_eq!(converted.type_.name.as_str(), "Transfer");
+        assert_eq!(converted.id.event_seq, 3);
+        // Missing package, garbage package, and non-struct types reject.
+        assert!(
+            grpc_event_to_sui_event(&grpc_event(None, Some("0x2::coin::Transfer")), &allow, 9)
+                .is_none()
+        );
+        assert!(
+            grpc_event_to_sui_event(
+                &grpc_event(Some("bogus"), Some("0x2::coin::Transfer")),
+                &allow,
+                9
+            )
+            .is_none()
+        );
+        assert!(
+            grpc_event_to_sui_event(&grpc_event(Some("0x2"), Some("u64")), &allow, 9).is_none()
+        );
+        assert!(grpc_event_to_sui_event(&grpc_event(Some("0x2"), None), &allow, 9).is_none());
+        // A rejecting filter drops even valid rows.
+        let deny = EventFilterProcessor::new(vec![sui_indexer_config::EventFilter {
+            package: Some("0x9".to_string()),
+            module: None,
+            event_type: None,
+            sender: None,
+        }]);
+        assert!(grpc_event_to_sui_event(&event, &deny, 9).is_none());
+    }
+
+    #[test]
+    fn jobs_spawn_only_when_configured() {
+        let empty = sui_indexer_config::IndexerConfig::default();
+        assert!(!jobs_enabled(&empty));
+        let mut with_jobs = empty;
+        with_jobs.jobs.push(sui_indexer_config::JobSpec::default());
+        assert!(jobs_enabled(&with_jobs));
+    }
+
+    #[test]
+    fn archive_window_advances_monotonically() {
+        assert_eq!(archive_window_to_catch_up(1, 100), Some((1, 100)));
+        assert_eq!(archive_window_to_catch_up(90, 100), Some((90, 100)));
+        // Caught up or unstarted: no window.
+        assert_eq!(archive_window_to_catch_up(101, 100), None);
+        assert_eq!(archive_window_to_catch_up(0, 0), None);
+        assert_eq!(archive_window_to_catch_up(0, 100), None);
     }
 
     #[test]

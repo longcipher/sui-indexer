@@ -517,6 +517,27 @@ sui-indexer status -c config.toml
   - Processing rate: 15.4 events/min
 ```
 
+### Indexing Jobs
+
+A job is data, not a process: one indexer serves one chain plus N
+user-defined jobs. Adding a data condition is a config/API operation, and a
+logic change builds a new versioned table and re-scans the archive.
+
+```bash
+sui-indexer job apply -f sandwich.toml      # create or bump version
+sui-indexer job plan -f sandwich.toml       # dry run: DDL + estimated scan size
+sui-indexer job ls                          # version, status, cursor, rows, lag
+sui-indexer job rescan sandwich --from 0    # explicit re-scan
+sui-indexer job retire sandwich             # retire the active version
+```
+
+Job specs live in `[[jobs]]` (see `config.example.toml`) or standalone TOML
+files. SQL-tier jobs replay the archive with chunked `INSERT … SELECT`;
+WASM-tier jobs run `.wasm` rules through the fuel-metered rule host. Outputs
+are versioned tables (`job_sandwich__v3`) behind an atomic alias view, and
+every versioned table is queryable through `/query` with no code change.
+Mutations under `/jobs` require the `x-indexer-admin: 1` header.
+
 ### Database Management
 
 Database migrations are handled automatically, but you can also manage them manually:

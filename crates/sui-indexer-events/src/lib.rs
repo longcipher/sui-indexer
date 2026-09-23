@@ -11,6 +11,8 @@ pub mod batch;
 pub mod filter;
 pub mod processor;
 pub mod protocols;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod transformer;
 
 pub use batch::*;
@@ -291,6 +293,54 @@ mod tests {
         assert_eq!(stats.total_transactions, 1);
         assert_eq!(stats.current_checkpoint, Some(123));
         assert_eq!(stats.events_by_type.get("test_event"), Some(&5));
+    }
+
+    #[test]
+    fn stats_accumulate_rates_and_averages() {
+        let mut stats = ProcessingStats::new();
+        // Backdate the start so rates are deterministic: elapsed ≈ 100s.
+        stats.start_time = Utc::now() - chrono::Duration::seconds(100);
+        let mut by_type = HashMap::new();
+        by_type.insert("Transfer".to_string(), 3);
+        stats.update(10, 5, 100, 200, Some(7), by_type);
+        assert_eq!(stats.total_events, 10);
+        assert_eq!(stats.total_transactions, 5);
+        assert_eq!(stats.current_checkpoint, Some(7));
+        assert_eq!(stats.avg_event_processing_ms, 10.0);
+        assert_eq!(stats.avg_transaction_processing_ms, 40.0);
+        assert_eq!(stats.events_by_type.get("Transfer"), Some(&3));
+        // Rates use the same elapsed divisor: ratio is exact.
+        assert!((stats.events_per_second - 0.1).abs() < 0.01);
+        assert!((stats.transactions_per_second - 0.05).abs() < 0.01);
+
+        // Second batch folds into running averages.
+        stats.update(10, 5, 300, 600, Some(8), HashMap::new());
+        assert_eq!(stats.total_events, 20);
+        assert_eq!(stats.avg_event_processing_ms, 20.0);
+        assert_eq!(stats.avg_transaction_processing_ms, 80.0);
+        assert_eq!(stats.events_by_type.get("Transfer"), Some(&3));
+    }
+
+    #[test]
+    fn stats_zero_update_keeps_zero_averages() {
+        let mut stats = ProcessingStats::new();
+        stats.update(0, 0, 0, 0, None, HashMap::new());
+        assert_eq!(stats.total_events, 0);
+        assert_eq!(stats.avg_event_processing_ms, 0.0);
+        assert_eq!(stats.avg_transaction_processing_ms, 0.0);
+        assert_eq!(stats.events_per_second, 0.0);
+    }
+
+    #[test]
+    fn stats_uptime_and_freshness() {
+        let mut stats = ProcessingStats::new();
+        stats.start_time = Utc::now() - chrono::Duration::seconds(100);
+        assert!(stats.uptime() >= chrono::Duration::seconds(99));
+        stats.update(1, 0, 1, 0, None, HashMap::new());
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        // Freshness is positive after real time passes (not a default zero).
+        assert!(stats.time_since_last_update() >= chrono::Duration::milliseconds(40));
+        assert!(stats.time_since_last_update() <= stats.uptime());
     }
 
     #[test]

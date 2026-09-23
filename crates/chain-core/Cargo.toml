@@ -1,0 +1,28 @@
+[package]
+name = "chain-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+documentation.workspace = true
+authors.workspace = true
+description = "Chain-neutral primitives for the multichain job engine: heights, cursors, reorg, throttling"
+rust-version.workspace = true
+keywords = ["blockchain", "indexer", "multichain", "sync"]
+categories = ["cryptography::blockchain", "database", "network-programming"]
+readme = "../../README.md"
+
+[dependencies]
+async-trait.workspace = true
+chrono.workspace = true
+eyre.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+proptest = "1.9"
+
+[lints]
+workspace = true

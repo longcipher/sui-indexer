@@ -1,0 +1,30 @@
+[package]
+name = "adapter-move"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+documentation.workspace = true
+authors.workspace = true
+description = "Move (Sui) chain adapter: fetch and decode behind the ChainAdapter contract"
+rust-version.workspace = true
+keywords = ["sui", "move", "blockchain", "indexer"]
+categories = ["cryptography::blockchain", "network-programming"]
+readme = "../../README.md"
+
+[dependencies]
+async-trait.workspace = true
+chain-core = { path = "../chain-core" }
+chrono.workspace = true
+hex.workspace = true
+serde_json.workspace = true
+sui-rpc-api.workspace = true
+sui-types.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+proptest = "1.9"
+
+[lints]
+workspace = true
