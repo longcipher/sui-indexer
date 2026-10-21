@@ -1,166 +1,31 @@
-# Sui Indexer — Agent Instructions
+# Sui Indexer Agent Instructions
+
+## Non-negotiables
+
+- Surgical edits only: every changed line must trace to the request. No drive-by refactors, no reformatting untouched code, no deleting pre-existing dead code (mention it instead).
+- Fix root causes. Never silence a warning, weaken a check, or patch a symptom to make a gate pass.
+- Never report completion while any `just` gate below fails. Report the failure verbatim and stop.
+- Stop and ask when a request is ambiguous, conflicts with existing conventions, or requires credentials, publishing, or destructive operations.
+- When a correction reveals a missing rule, add one specific rule here ("always X for Y", never "be careful with Y"); delete rules that never catch real errors.
 
 ## Scope
 
-- This is a Rust **workspace** for a high-performance, modular **Sui blockchain indexer**.
-- `bin/sui-indexer-cli` contains the production CLI binary (published as `sui-indexer`).
-- `crates/` contains reusable library crates:
-  - `sui-indexer-config` — configuration management & loading (TOML + env).
-  - `sui-indexer-core` — orchestration (`IndexerCore`), Sui gRPC client integration.
-  - `sui-indexer-events` — event-processing pipeline (`EventProcessor` trait, batch/filter/transformer).
-  - `sui-indexer-storage` — PostgreSQL storage layer (`sqlx`), models, migrations.
-- No frontend/web-framework assumptions. The indexer is a headless service.
+- Rust workspace for a modular blockchain indexer. `bin/sui-indexer-cli` is the production CLI (published binary name: `sui-indexer`).
+- Crates, bottom-up: `sui-indexer-config` (TOML + env config), `chain-core` (chain-neutral height cursor, sync, reorg, decoded-row contract), `adapter-move` (Sui checkpoints), `adapter-svm` (Solana slots), `sui-indexer-events` (batch/filter/transformer pipeline), `sui-indexer-storage` (PostgreSQL via `sqlx` plus `crates/sui-indexer-storage/migrations/`), `job-engine` (N user-defined indexing jobs), `rule-host` (hot-loadable WASM rules), `archive-store` (ClickHouse archive of record), `sui-indexer-core` (orchestration: `IndexerCore`, sync engine, sinks, repair, jobs).
+- `config.example.toml` documents the config surface; `docs/multichain-job-engine.md` is the design proposal behind `chain-core`/`job-engine`/`rule-host`; `examples/` shows the library API.
+- English only in code, comments, docs, and commit messages.
 
-## Execution Strategy
+## Execution
 
-- Maximize parallelism by dispatching subagents aggressively and consuming tokens freely to complete tasks faster.
+- Parallelize aggressively: dispatch subagents for independent research, exploration, and implementation.
+- NEVER run two `cargo` commands concurrently, and never overlap file edits with a running `cargo` command (`target/` file lock): finish edits, wait, then run.
+- NEVER use `git worktree`. Edit the current branch in place.
+- TDD for behavior changes: failing test first, smallest change to pass, then run `just mutation` and fix surviving mutants.
+- The `sui-*` git dependencies pull and compile a large slice of the Sui monorepo, so a full `cargo build`/`cargo check`/`cargo test` is slow. Use `just check-fast` (`cargo metadata --no-deps`) for fast structural verification while iterating.
 
-## Tool Usage & Commands
+## Verification loop
 
-- **NEVER execute `cargo` commands in parallel.** Rust's cargo uses strict file locks on the `target/` directory.
-- ALWAYS run `cargo check`, `cargo build`, or `cargo test` sequentially. Wait for one to finish before starting the next.
-- When fixing errors, execute the file `Write`/`Edit` tool FIRST, wait for it to succeed, and only THEN run `cargo` commands to verify. Do not parallelize file edits with cargo builds.
-- `sui-*` dependencies are **git dependencies** (MystenLabs/sui). A full `cargo build` pulls and compiles a large portion of the Sui monorepo — expect long builds. Prefer `cargo check --no-deps` and `cargo metadata --no-deps` for fast structural verification.
-
-## Build Configuration
-
-- Optional: add a `.cargo/config.toml` that wraps `rustc` with [kache](https://github.com/nicholasgasior/kache) to cache compilation artifacts and speed up incremental builds:
-
-  ```toml
-  [build]
-  rustc-wrapper = "kache"
-  ```
-
-## Cargo Workspace Rules (Critical)
-
-1. Never manually type dependency versions in `Cargo.toml`; use `cargo add`.
-2. Add workspace-level dependencies with:
-
-   ```bash
-   cargo add <crate> --workspace
-   ```
-
-3. Add sub-crate dependencies with:
-
-   ```bash
-   cargo add <crate> -p <crate-name> --workspace
-   ```
-
-4. Root `[workspace.dependencies]` must use numeric versions only (git deps pin `rev`).
-5. Root `[workspace.dependencies]` must not carry features by default; sub-crates enable the features they need.
-6. Sub-crates must use `workspace = true` for `version`, `edition`, `license`, `repository`, `homepage`, `documentation`, `authors`, `rust-version`, and `readme`.
-7. Every crate must opt into the shared lint set with `[lints] workspace = true`.
-
-### Sui git dependency policy
-
-- All `sui-*` crates resolve from the **same** `git = "https://github.com/MystenLabs/sui.git"` source pinned to a single `rev`.
-- The current pinned rev lives in `[workspace.dependencies]` as `sui-rev` (documentation only) and is repeated on every `sui-*` entry.
-- When bumping the Sui SDK, update `rev` on **all** `sui-*` entries to the same commit so Cargo does not compile multiple copies of `sui-types`/`sui-sdk-types` (which would cause type-mismatch errors).
-- Fetch the latest `main` rev with:
-
-  ```bash
-  git ls-remote https://github.com/MystenLabs/sui.git HEAD
-  ```
-
-## Preferred Dependencies
-
-When introducing new dependencies, prefer these crates unless compatibility requires a different choice:
-
-```
-clap, config, eyre, proptest, serde, thiserror, tokio, tracing, tracing-subscriber,
-sqlx, async-trait, scc, parking_lot, chrono, uuid, url, futures, pin-project, hex
-```
-
-Always use the latest stable version available on crates.io. Run `cargo add <crate> --workspace` to add dependencies — this automatically resolves to the latest version.
-
-### Project-mandated exceptions
-
-The Sui ecosystem SDK (`sui-sdk`, `sui-json-rpc-types`, `sui-rpc-api`, …) pulls in and is built around `reqwest` and `anyhow`. As a result this workspace **does** use `reqwest` (HTTP/gRPC transport) and `anyhow` (application-layer glue) even though they are commonly avoided in greenfield projects. New code should still prefer `eyre` for application errors and `thiserror` for library errors; reach for `anyhow` only where the Sui SDK API forces it.
-
-## Engineering Principles
-
-### Rust Implementation Guidelines
-
-1. Error handling:
-   - Application layer: `eyre`.
-   - Library layer: `thiserror`.
-2. Database (`sqlx`):
-   - Prefer runtime queries (`sqlx::query_as`).
-   - DB structs should derive `sqlx::FromRow`.
-   - Avoid compile-time `sqlx::query!` macros by default.
-3. Concurrency:
-   - Prefer lock-free/container-first approaches (`scc`, `ArcSwap`).
-   - Avoid `Arc<Mutex<T>>` when better alternatives are available.
-4. Observability:
-   - Logging: `tracing` only (never `println!`/`eprintln!` in library code).
-   - CLI binary may use `tracing-subscriber` with env-filter / JSON formatting.
-5. Configuration:
-   - Use the `config` crate and external TOML files (see `config.example.toml`).
-6. Safety:
-   - Use `unsafe` only when strictly necessary and document the safety invariants.
-
-### Key Design Principles
-
-- Modularity: each crate is independently usable with clear boundaries (`config` → `events`/`storage` → `core` → `cli`).
-- Performance: parallel event processing, async I/O via Tokio, PostgreSQL connection pooling.
-- Extensibility: custom behavior via the `EventProcessor` trait and declarative TOML event filters.
-- Type Safety: strong static typing across crate boundaries; minimal dynamic dispatch.
-
-### Concurrency and Async Execution
-
-- Prefer atomic types (`AtomicUsize`, `AtomicBool`, etc.) with explicit `Ordering` for simple shared state.
-- Use `scc` for highly concurrent maps/sets; avoid `Arc<RwLock<HashMap<...>>>` and `Arc<Mutex<HashMap<...>>>` on hot paths.
-- Prefer `parking_lot::{Mutex, RwLock}` over `std::sync` locks for synchronous locking.
-- Release `std::sync::Mutex` and `parking_lot::Mutex` guards before hitting any `.await` point.
-- Use `tokio::sync::Mutex` for locks that span across `.await` points.
-- Use `tokio::task::spawn_blocking` for CPU-bound work and blocking I/O.
-- Batch work or use bounded worker patterns instead of spawning massive volumes of tiny Tokio tasks.
-- Channel selection:
-  - Async-to-Async: `tokio::sync::mpsc` / `tokio::sync::broadcast`
-  - Sync/MPMC: `crossbeam-channel` or `flume`
-  - Avoid `std::sync::mpsc`
-
-### Memory and Allocation
-
-- For binary server applications, configure `tikv-jemallocator` or `mimalloc` if profiling shows allocator pressure.
-- Use `bytes::Bytes` / `bytes::BytesMut` for network buffers.
-- For critical serialization hot paths, prefer `rkyv` or `zerocopy`; reserve `serde_json` for config and non-critical APIs.
-
-### Tooling and Hot Paths
-
-- Keep code clean under `clippy::pedantic`, `clippy::nursery`, and `clippy::cargo` (allowed overrides are configured in `[workspace.lints]`).
-- Use `#[inline]` for tiny methods called in hot loops or on every request, especially across crate boundaries.
-- Mark cold error paths with `#[cold]` and `#[inline(never)]` when it improves hot-path instruction locality.
-
-### What to Avoid
-
-- Incomplete implementations: finish features before submitting.
-- Large, sweeping changes: keep changes focused and reviewable.
-- Mixing unrelated changes: keep one logical change per commit.
-- Multiple `sui-*` `rev` values in the same workspace (see Sui git dependency policy).
-
-## Development Workflow
-
-When fixing failures, identify root cause first, then apply idiomatic fixes instead of suppressing warnings or patching symptoms.
-
-### Sui-specific gotchas
-
-- Type identity across crates depends on a single `sui-types`/`sui-sdk-types` build. If you see opaque "expected `sui_types::…`, found `sui_types::…`" mismatches, check that every `sui-*` dependency shares the same `rev`.
-- `sui-json-rpc-types::SuiEvent` is the canonical event type used throughout `sui-indexer-events`.
-
-## Parallelization and Resource Utilization
-
-- **Use as many subagents and as much token budget as needed** to complete tasks efficiently. Parallelize independent work aggressively and maximize context utilization. Spawn subagents for independent research, code exploration, and implementation tasks to reduce latency and improve throughput.
-
-Use test-driven development for behavior changes:
-
-- **Git Restrictions:** NEVER use `git worktree`. All code modifications MUST be made directly on the current branch in the existing working directory.
-- drive implementation with failing crate-local unit tests and `proptest` properties in the affected crate,
-- keep `proptest` in the normal `cargo test` loop instead of creating a separate property-test command,
-- treat `cargo-fuzz` as conditional planning work rather than baseline template setup,
-- after the inner loop is green, run `just mutation` (cargo-mutants) and fix any surviving mutants.
-
-After each feature or bug fix, run:
+After each feature or bug fix, in order; any failure means the task is not done:
 
 ```bash
 just format
@@ -169,20 +34,29 @@ just test
 just mutation
 ```
 
-If any command fails, report the failure and do not claim completion.
+This repo has no CI workflow, so `just lint` is the gate: typos, rumdl, `taplo fmt --check`, `cargo sort -c`, `cargo fmt --check`, `cargo clippy -D warnings`, `cargo shear`, workspace-inheritance check. `just test` needs no database — the `*_live.rs` tests skip themselves unless `DATABASE_URL` points at a scratch PostgreSQL. Run `just setup` once to install the tools `just lint` needs.
 
-## Testing Requirements
+## Rust rules
 
-- Unit tests: colocate with implementation (`#[cfg(test)]`).
-- Use `cargo test` as the TDD inner loop; write a failing test first, then implement the smallest change that makes it pass.
-- Property tests: colocate `proptest` coverage with the crate logic it exercises so it runs through the ordinary `cargo test` path.
-- Cover boundary conditions (empty inputs, zero values, maximum sizes) with explicit assertions.
-- Mutation testing: run `just mutation` (cargo-mutants) and fix any surviving mutants to keep the mutation score high.
-- Benchmarks: only plan or add Criterion when the scope includes an explicit latency SLA, throughput target, or known hot path in a specific crate.
-- Fuzz tests: only plan or add `cargo-fuzz` when a crate parses hostile input, implements protocols, decodes binary formats, or contains meaningful `unsafe` code. The event transformer/filter crates are the most likely candidates.
-- Integration tests: place in crate-level `tests/`.
-- Add tests for behavioral changes and public API changes.
+- Toolchain is pinned to stable `1.96.1` in `rust-toolchain.toml`; the Justfile uses plain `cargo fmt` / `cargo clippy`. Do not introduce `+nightly` or `+1.96.1` variants.
+- All `sui-*` dependencies are git deps from `MystenLabs/sui` pinned to ONE `rev`, repeated on every `sui-*` entry in `[workspace.dependencies]`. Two different revs compile two copies of `sui-types` and produce "expected `sui_types::…`, found `sui_types::…`" mismatches. Find a new rev with `git ls-remote https://github.com/MystenLabs/sui.git HEAD`.
+- Never hand-type dependency versions. Shared deps live in root `[workspace.dependencies]` (numeric versions, no features) and are referenced with `dep = { workspace = true }`; add them with `cargo add <crate> --workspace` and enable features in the member crate.
+- Every library crate sets `[lints] workspace = true`. The shared set denies `panic`, `todo`, `unimplemented`, `dbg_macro`, `print_stdout`, `print_stderr` and bare `#[allow]`. `unwrap_used`/`expect_used` are `allow` here — do not tighten them without a migration plan. The CLI crate uses its own `[lints.clippy]` because it prints user-facing tables.
+- `cargo shear` cannot see the Sui git deps that are only reached through re-exports; they are listed in `[workspace.metadata.cargo-shear] ignored`. If it flags a `sui-*` crate, add that exact name to the list — never delete the dependency.
 
-## Language Requirement
+## Dependency choices
 
-- Documentation, comments, and commit messages must be English only.
+- Errors: `thiserror` for concrete library error types, `eyre` for application glue, `anyhow` only in `rule-host` (the wasmtime host API). Never invent string errors.
+- HTTP: `reqwest` (rustls) is already in the tree because the Sui SDK requires it. Do not add a second HTTP client.
+- Database: `sqlx` + PostgreSQL. Runtime queries only (`sqlx::query_as` with `#[derive(sqlx::FromRow)]`); never the compile-time `sqlx::query!` macros — they need a live database at build time. Schema changes go into `crates/sui-indexer-storage/migrations/` as a new timestamped `.sql` file, never as an edit to an applied one.
+- Logging: `tracing` only. `print_stdout`/`print_stderr` are denied in library code.
+- Property tests: `proptest` lives in `adapter-move`, `adapter-svm`, `chain-core`, `job-engine` and `rule-host` and runs inside the normal `cargo test` loop. Do not add a separate property-test command.
+
+## Code conventions
+
+- Unit tests live in `#[cfg(test)]` modules next to the code; integration tests in crate-level `tests/`. Add a test for every behavior or public-API change.
+- A job is DATA, not a process: job definitions live in the control-plane tables and `job-engine` reconciles desired state. A logic change means a new versioned output table with an atomic alias swap (`job-engine/src/outputs.rs`) — never an in-place `ALTER` of a live output.
+- `chain-core` owns the chain-neutral contract (`ChainKind`, `DecodedBlock`, `ReorgMode`, height cursor). Chain-specific fetch and decode live in `adapter-*`; the sync engine must never learn chain types.
+- `rule-host` speaks ONE encoding: JSON over a single wasmtime linear-memory call against a versioned ABI (`ABI_VERSION`). Rules never see Rust types; changing the ABI means bumping `ABI_VERSION`.
+- Release lock guards before `.await`; use `tokio::sync::Mutex` only where the guard must span an `.await` (e.g. the shared Sui gRPC client in `adapter-move`).
+- `cargo mutants` writes `mutants.out/`, which this repo does NOT git-ignore — do not commit it. Fix surviving mutants instead of widening the ignored set.
